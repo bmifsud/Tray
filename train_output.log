@@ -1,0 +1,29 @@
+/app/train_nas100_lstm.py:146: UserWarning: # 'dynamic_axes' is not recommended when dynamo=True, and may lead to 'torch._dynamo.exc.UserError: Constraints violated.' Supply the 'dynamic_shapes' argument instead if export is unsuccessful.
+  torch.onnx.export(model, dummy_input, "nas100_lstm.onnx",
+W0921 11:38:29.636000 8227 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::nms
+W0921 11:38:29.638000 8227 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::roi_align
+W0921 11:38:29.638000 8227 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::roi_pool
+W0921 11:38:29.638000 8227 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::deform_conv2d
+/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/torch/_dynamo/utils.py:4415: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  return node.target(*args, **kwargs)  # type: ignore[operator]
+<eval_with_key>.1:6: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  _check_is_size = torch._check_is_size(item);  _check_is_size = None
+<eval_with_key>.1:7: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  _check_is_size_1 = torch._check_is_size(item, max = 24);  _check_is_size_1 = None
+<eval_with_key>.7:10: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  _check_is_size = torch._check_is_size(item);  _check_is_size = None
+<eval_with_key>.7:11: FutureWarning: _check_is_size will be removed in a future PyTorch release along with guard_size_oblivious.     Use _check(i >= 0) instead.
+  _check_is_size_1 = torch._check_is_size(item, max = 24);  _check_is_size_1 = None
+/home/jules/.pyenv/versions/3.12.13/lib/python3.12/contextlib.py:144: UserWarning: The tensor attributes self.lstm._flat_weights[0], self.lstm._flat_weights[1], self.lstm._flat_weights[2], self.lstm._flat_weights[3] were assigned during export. Such attributes must be registered as buffers using the `register_buffer` API (https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_buffer).
+  next(self.gen)
+Model MSE: 0.085658
+Naive Baseline MSE: 0.179147
+[torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`...
+[torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`... ✅
+[torch.onnx] Run decompositions...
+[torch.onnx] Run decompositions... ✅
+[torch.onnx] Translate the graph into ONNX...
+[torch.onnx] Translate the graph into ONNX... ✅
+[torch.onnx] Optimize the ONNX graph...
+[torch.onnx] Optimize the ONNX graph... ✅
+Model exported to nas100_lstm.onnx
