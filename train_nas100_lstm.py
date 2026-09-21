@@ -148,8 +148,8 @@ def train():
 
                       do_constant_folding=True,
                       input_names=['input'],
-                      output_names=['output'],
-                      dynamic_axes={'input' : {0 : 'batch_size'}, 'output' : {0 : 'batch_size'}})
+                      output_names=['output'])
+
 
     print("Model exported to nas100_lstm.onnx")
 
