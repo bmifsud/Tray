@@ -2,14 +2,16 @@ import pandas as pd
 import gdown
 import os
 import shutil
+import sys
 
-def extract_data():
+def extract_data(input_file="NasData/NQ_in_daily.csv", download=True):
     # Download folder from Google Drive
-    url = "https://drive.google.com/drive/folders/13LjovZc6Vo4ZCTlyAM55vRsb4au0oJo8"
-    gdown.download_folder(url, output="NasData", quiet=False, use_cookies=False)
+    if download:
+        url = "https://drive.google.com/drive/folders/13LjovZc6Vo4ZCTlyAM55vRsb4au0oJo8"
+        gdown.download_folder(url, output="NasData", quiet=False, use_cookies=False)
 
-    # Use daily data
-    df = pd.read_csv("NasData/NQ_in_daily.csv")
+    print(f"Extracting data from: {input_file}")
+    df = pd.read_csv(input_file)
 
     # Rename columns to match existing pipeline
     # ['time', 'open', 'high', 'low', 'close', 'tick_volume']
@@ -33,4 +35,7 @@ def extract_data():
     print("Data extraction complete. Saved to nas100_raw.csv")
 
 if __name__ == '__main__':
-    extract_data()
+    if len(sys.argv) > 1:
+        extract_data(sys.argv[1], download=False)
+    else:
+        extract_data()
