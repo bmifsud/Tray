@@ -11,6 +11,7 @@
 - `numpy >= 1.24.0`: Mathematical vectors and matrix transformations
 - `scikit-learn >= 1.2.0`: Feature scaling (`StandardScaler`) and metric computation
 - `onnx >= 1.14.0`: Cross-platform model representation for MT5 integration
+- `MetaTrader5 >= 5.0.0`: Direct broker terminal API for bar and tick extraction
 - `gdown >= 5.0.0`: Automated dataset acquisition from Google Drive
 
 ## Input Data Specifications

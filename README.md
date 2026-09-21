@@ -81,7 +81,20 @@ Validated on out-of-sample partitions across all downloaded timeframe datasets:
 
 ---
 
-## 4. Usage Instructions
+### Download Bar and Tick Data from MetaTrader 5
+```bash
+# Auto-detect NAS100 symbol and download both bars and ticks (default 3-minute bars)
+cmd /c python download_nas100_mt5.py
+
+# Download all standard timeframes (M1 to MN1) from MT5
+cmd /c python download_nas100_mt5.py --timeframe all --bars 50000
+
+# Download 100,000 tick-level records for microstructural analysis
+cmd /c python download_nas100_mt5.py --type ticks --ticks 100000
+
+# Download 5-minute bars and immediately update nas100_raw.csv for model training
+cmd /c python download_nas100_mt5.py --timeframe M5 --bars 20000 --update_raw
+```
 
 ### Run the Global Multi-Timeframe Pipeline
 ```bash

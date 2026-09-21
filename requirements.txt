@@ -6,3 +6,4 @@ onnx
 onnxscript
 torchvision
 gdown
+MetaTrader5
