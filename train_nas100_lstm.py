@@ -43,15 +43,18 @@ class LSTMModel(nn.Module):
         return out
 
 def train():
+    print("[INFO] Loading raw data from nas100_raw.csv...")
     df = pd.read_csv('nas100_raw.csv')
 
     features = ['open', 'high', 'low', 'close', 'tick_volume']
     data = df[features].values
 
+    print("[INFO] Enforcing strict chronological train/validation split (80/20)...")
     # Train/test split (80/20)
     train_size = int(len(data) * 0.8)
     train_data, test_data = data[0:train_size, :], data[train_size:len(data), :]
 
+    print("[INFO] Fitting Min-Max scaler parameters strictly on training partition...")
     # Min-Max Scaling strictly on training data
     scaler = MinMaxScaler()
     train_data_scaled = scaler.fit_transform(train_data)
@@ -66,6 +69,7 @@ def train():
     }
     with open('scaler_params.json', 'w') as f:
         json.dump(scaler_params, f)
+    print("       -> Serialized normalization parameters to 'scaler_params.json'.")
 
     # Create sequences
     lookback = 25
@@ -77,14 +81,15 @@ def train():
     X_test = torch.tensor(X_test, dtype=torch.float32)
     Y_test = torch.tensor(Y_test, dtype=torch.float32).view(-1, 1)
 
+    print("[INFO] Initializing Single-Layer LSTM (Hidden Neurons: 16, Dropout: 0.2)...\n")
     # Model, Loss, Optimizer
     model = LSTMModel(input_size=len(features), hidden_size=16, dropout=0.2)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # Training Loop with Early Stopping
-    epochs = 100
-    patience = 100
+    epochs = 500
+    patience = 100 # keep patience or update if needed? The user doesn't specify patience, but I will keep it at 100
     best_loss = float('inf')
     counter = 0
 
@@ -101,16 +106,25 @@ def train():
             val_outputs = model(X_test)
             val_loss = criterion(val_outputs, Y_test)
 
+        saved_msg = ""
         if val_loss < best_loss:
             best_loss = val_loss
             counter = 0
             torch.save(model.state_dict(), 'best_model.pth')
+            saved_msg = " (Saved Best Model)"
         else:
             counter += 1
 
+        # Print logic
+        print(f"Epoch {epoch+1:02d}/{epochs} | Train Loss: {loss.item():.6f} | Val Loss: {val_loss.item():.6f}{saved_msg}")
+
         if counter >= patience:
-            print(f"Early stopping at epoch {epoch}")
+            print(f"\n[INFO] Early stopping triggered at epoch {epoch+1}. Best Validation Loss: {best_loss:.6f}")
             break
+
+    if counter < patience:
+        print(f"\n[INFO] Training completed. Best Validation Loss: {best_loss:.6f}")
+
 
     # Load best model
     model.load_state_dict(torch.load('best_model.pth'))
@@ -127,25 +141,31 @@ def train():
     # Naive preds on scaled data: just take the last element of each sequence (which is the previous day's data), and index 3 for close
     naive_preds = X_test.numpy()[:, -1, 3]
 
-    model_mse = mean_squared_error(Y_test_np, test_preds)
-    naive_mse = mean_squared_error(Y_test_np, naive_preds)
+    model_rmse = np.sqrt(mean_squared_error(Y_test_np, test_preds))
+    naive_rmse = np.sqrt(mean_squared_error(Y_test_np, naive_preds))
 
-    print(f"Model MSE: {model_mse:.6f}")
-    print(f"Naive Baseline MSE: {naive_mse:.6f}")
+    alpha_improvement = ((naive_rmse - model_rmse) / naive_rmse) * 100
 
     # Export to ONNX
     dummy_input = torch.randn(1, lookback, len(features))
 
-    # Since batch size in MT5 will likely be 1, but we might want dynamic batching, let's fix batch=1 for MT5
-    torch.onnx.export(model, dummy_input, "nas100_lstm.onnx",
-                      export_params=True,
+    export_status = "SUCCESS ('nas100_lstm.onnx')"
+    try:
+        torch.onnx.export(model, dummy_input, "nas100_lstm.onnx",
+                          export_params=True,
+                          do_constant_folding=True,
+                          input_names=['input'],
+                          output_names=['output'])
+    except Exception as e:
+        export_status = f"FAILED ({str(e)})"
 
-                      do_constant_folding=True,
-                      input_names=['input'],
-                      output_names=['output'])
-
-
-    print("Model exported to nas100_lstm.onnx")
+    print("\n==================================================")
+    print("              MODEL VALIDATION METRICS")
+    print("==================================================")
+    print(f"* Root Mean Squared Error (LSTM Model):     {model_rmse:.5f}")
+    print(f"* Root Mean Squared Error (Naive Baseline): {naive_rmse:.5f}")
+    print(f"* Alpha Performance Improvement:            +{alpha_improvement:.2f}% (Beats Naive Persistence)" if alpha_improvement > 0 else f"* Alpha Performance Improvement:            {alpha_improvement:.2f}% (Underperforms Naive Baseline)")
+    print(f"* ONNX Export Status:                       {export_status}\n")
 
 if __name__ == '__main__':
     train()
