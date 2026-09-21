@@ -185,6 +185,20 @@ def download_bars(symbol, timeframe_key, count=100000, output_dir="NasData"):
 
     filename = f"NQ_in_{tf_label}.csv"
     output_path = os.path.join(output_dir, filename)
+
+    if os.path.exists(output_path):
+        try:
+            old_df = pd.read_csv(output_path)
+            if 'datetime' in old_df.columns:
+                old_df = old_df.rename(columns={'datetime': 'time', 'volume': 'tick_volume'})
+            old_df['time'] = pd.to_datetime(old_df['time'], utc=True)
+            df = pd.concat([old_df, df], ignore_index=True)
+            df = df.drop_duplicates(subset=['time'], keep='last')
+            df = df.sort_values('time').reset_index(drop=True)
+            print(f"       -> Incremental update: merged new bars with existing CSV (total: {len(df):,} bars)")
+        except Exception as e:
+            print(f"[WARN] Failed to merge with existing CSV ({e}), overwriting...")
+
     df.to_csv(output_path, index=False)
 
     print(f"[SUCCESS] Saved {len(df):,} bars to: {output_path}")
@@ -227,6 +241,22 @@ def download_ticks(symbol, count=500000, output_dir="NasData"):
 
     filename = f"{symbol.replace('.', '_')}_ticks.csv"
     output_path = os.path.join(output_dir, filename)
+
+    if os.path.exists(output_path):
+        try:
+            old_df = pd.read_csv(output_path)
+            if 'time_msc' in old_df.columns:
+                old_df['time'] = pd.to_datetime(old_df['time_msc'], unit='ms', utc=True)
+            elif 'time' in old_df.columns:
+                old_df['time'] = pd.to_datetime(old_df['time'], utc=True)
+            df = pd.concat([old_df, df], ignore_index=True)
+            subset_col = 'time_msc' if 'time_msc' in df.columns else 'time'
+            df = df.drop_duplicates(subset=[subset_col], keep='last')
+            df = df.sort_values(subset_col).reset_index(drop=True)
+            print(f"       -> Incremental update: merged new ticks with existing CSV (total: {len(df):,} ticks)")
+        except Exception as e:
+            print(f"[WARN] Failed to merge existing tick CSV ({e}), overwriting...")
+
     df.to_csv(output_path, index=False)
 
     print(f"[SUCCESS] Saved {len(df):,} ticks to: {output_path}")
