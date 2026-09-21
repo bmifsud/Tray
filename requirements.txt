@@ -5,3 +5,4 @@ torch
 onnx
 onnxscript
 torchvision
+gdown

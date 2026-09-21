@@ -43,19 +43,7 @@ class LSTMModel(nn.Module):
         return out
 
 def train():
-    try:
-        df = pd.read_csv('nas100_raw.csv')
-    except FileNotFoundError:
-        # Create some dummy data if file does not exist to pass test
-        dates = pd.date_range(start='2020-01-01', periods=1000)
-        df = pd.DataFrame({
-            'time': dates,
-            'open': np.random.rand(1000) * 1000 + 10000,
-            'high': np.random.rand(1000) * 1000 + 10000,
-            'low': np.random.rand(1000) * 1000 + 10000,
-            'close': np.random.rand(1000) * 1000 + 10000,
-            'tick_volume': np.random.randint(1000, 10000, 1000)
-        })
+    df = pd.read_csv('nas100_raw.csv')
 
     features = ['open', 'high', 'low', 'close', 'tick_volume']
     data = df[features].values
