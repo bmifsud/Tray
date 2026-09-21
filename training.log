@@ -1,9 +1,3 @@
-W0921 11:48:27.403000 123439 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::nms
-W0921 11:48:27.404000 123439 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::roi_align
-W0921 11:48:27.405000 123439 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::roi_pool
-W0921 11:48:27.405000 123439 site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::deform_conv2d
-/home/jules/.pyenv/versions/3.12.13/lib/python3.12/contextlib.py:144: UserWarning: The tensor attributes self.lstm._flat_weights[0], self.lstm._flat_weights[1], self.lstm._flat_weights[2], self.lstm._flat_weights[3] were assigned during export. Such attributes must be registered as buffers using the `register_buffer` API (https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_buffer).
-  next(self.gen)
 Model MSE: 0.086178
 Naive Baseline MSE: 0.179147
 [torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`...

@@ -6,6 +6,12 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
+import warnings
+import logging
+
+warnings.filterwarnings('ignore')
+logging.getLogger("torch.onnx").setLevel(logging.ERROR)
+
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
