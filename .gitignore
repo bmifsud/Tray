@@ -1,6 +1,11 @@
-*.onnx
-*.onnx.data
-*.pth
-scaler_params.json
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
 nas100_raw.csv
-NasData/
+
+# Environment variables and secrets
+.env
+*.env
+.env.*
+!.env.example

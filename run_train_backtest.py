@@ -1,157 +1,262 @@
 import os
-import subprocess
 import json
+import argparse
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+import glob
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from train_nas100_lstm import train_tf_dataset, DirectionalLSTM, compute_features
 
-def execute_pipeline():
-    print("=== STEP 1: Executing Leak-Free LSTM Training & ONNX Export ===")
-    subprocess.run(["python3", "train_nas100_lstm.py"], check=True)
+def process_single_timeframe(filepath):
+    filename = os.path.basename(filepath)
+    clean_tf = os.path.splitext(filename)[0]
+    
+    try:
+        raw_df = pd.read_csv(filepath)
+    except Exception as e:
+        return {'timeframe': filename, 'total_bars': 0, 'triggers': 0, 'trades': 0, 'win_rate': 0.0, 'profit_factor': 0.0, 'total_r': 0.0, 'net_return': 0.0, 'max_dd': 0.0, 'opt_params': 'Failed'}
 
-    print("\n=== STEP 2: Running Evaluation & Backtest Analysis ===")
+    raw_df = raw_df.rename(columns={'datetime': 'time', 'volume': 'tick_volume'})
+    if 'time' in raw_df.columns:
+        raw_df['time'] = pd.to_datetime(raw_df['time'], utc=True)
+        raw_df = raw_df.sort_values('time').reset_index(drop=True)
 
-    # 1. Load scaler parameters and raw data
-    with open('scaler_params.json', 'r') as f:
-        scaler_params = json.load(f)
+    required_cols = {'open', 'high', 'low', 'close', 'tick_volume'}
+    if not required_cols.issubset(raw_df.columns):
+        return {'timeframe': filename, 'total_bars': 0, 'triggers': 0, 'trades': 0, 'win_rate': 0.0, 'profit_factor': 0.0, 'total_r': 0.0, 'net_return': 0.0, 'max_dd': 0.0, 'opt_params': 'Invalid Cols'}
 
-    min_close = scaler_params['min_'][3] # Fixed key to match our output
-    scale_close = scaler_params['scale_'][3] # Fixed key
+    train_res = train_tf_dataset(raw_df, filename, optimize_grid=True)
+    if train_res is None:
+        return {'timeframe': filename, 'total_bars': 0, 'triggers': 0, 'trades': 0, 'win_rate': 0.0, 'profit_factor': 0.0, 'total_r': 0.0, 'net_return': 0.0, 'max_dd': 0.0, 'opt_params': 'N/A'}
 
-    df = pd.read_csv('nas100_raw.csv')
-    features = ['open', 'high', 'low', 'close', 'tick_volume']
-    raw_values = df[features].values.astype(np.float32)
-    n_samples = len(raw_values)
+    df_clean = train_res['df_clean']
+    scaler_params = train_res['scaler_params']
+    best_model_state = train_res['model_state']
+    best_params = train_res['best_params']
+
+    feature_names = scaler_params['feature_names']
+    mean_ = np.array(scaler_params['mean_'], dtype=np.float32)
+    scale_ = np.array(scaler_params['scale_'], dtype=np.float32)
+    lookback = scaler_params['lookback']
+    hidden_size = scaler_params['hidden_size']
+
+    n_samples = len(df_clean)
     split_idx = int(n_samples * 0.8)
 
-    # Re-apply train normalization to match validation loader logic
-    train_min = np.array(scaler_params['min_'], dtype=np.float32)
-    scale_range = 1.0 / np.array(scaler_params['scale_'], dtype=np.float32) # scale_ is standard deviation or scale factor in minmax, let's just use sklearn's logic directly if possible, or inverse it. Actually, minmax formula is (x - data_min_) * scale_ where min_ = -data_min * scale_. So x_scaled = x * scale_ + min_. Let's just use that.
+    if (n_samples - split_idx) <= lookback + 10:
+        return {'timeframe': filename, 'total_bars': max(0, n_samples - split_idx), 'triggers': 0, 'trades': 0, 'win_rate': 0.0, 'profit_factor': 0.0, 'total_r': 0.0, 'net_return': 0.0, 'max_dd': 0.0, 'opt_params': f"L={lookback},H={hidden_size}"}
 
-    scaled_values = raw_values * np.array(scaler_params['scale_'], dtype=np.float32) + train_min
+    X_raw = df_clean[feature_names].values
+    X_scaled = (X_raw - mean_) / (scale_ + 1e-8)
 
-    # Rebuild validation set windows
-    seq_length = 25
-    X_val, y_val = [], []
-    for i in range(n_samples - seq_length):
-        target_idx = i + seq_length
-        if target_idx >= split_idx:
-            window = scaled_values[i:target_idx]
-            target = scaled_values[target_idx, 3]
-            X_val.append(window)
-            y_val.append([target])
+    X_val_seq = []
+    val_indices = []
+    for i in range(split_idx, n_samples - lookback):
+        window = X_scaled[i:i + lookback]
+        X_val_seq.append(window)
+        val_indices.append(i + lookback)
 
-    X_val = np.array(X_val, dtype=np.float32)
-    y_val = np.array(y_val, dtype=np.float32)
+    X_val_seq = np.array(X_val_seq, dtype=np.float32)
 
-    val_loader = DataLoader(
-        TensorDataset(torch.tensor(X_val), torch.tensor(y_val)),
-        batch_size=8,
-        shuffle=False
-    )
-
-    # 2. Load trained model structure for inference
-    # Note: our train_nas100_lstm.py defines LSTMModel, we will redefine it here to match
-    class LSTMModel(nn.Module):
-        def __init__(self, input_size=5, hidden_size=16, num_layers=1, dropout=0.2):
-            super(LSTMModel, self).__init__()
-            self.hidden_size = hidden_size
-            self.num_layers = num_layers
-            self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0.0)
-            self.fc = nn.Linear(hidden_size, 1)
-            self.dropout = nn.Dropout(dropout)
-
-        def forward(self, x):
-            h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-            c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-            out, _ = self.lstm(x, (h0, c0))
-            out = self.dropout(out[:, -1, :])
-            out = self.fc(out)
-            return out
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = LSTMModel().to(device)
-    model.load_state_dict(torch.load('best_model.pth', map_location=device, weights_only=True))
+    device = torch.device('cpu')
+    model = DirectionalLSTM(input_size=len(feature_names), hidden_size=hidden_size).to(device)
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
     model.eval()
 
-    # 3. Generate predictions
-    val_preds = []
     with torch.no_grad():
-        for batch_X, _ in val_loader:
-            batch_X = batch_X.to(device)
-            preds = model(batch_X)
-            val_preds.extend(preds.cpu().numpy().flatten())
+        val_tensor = torch.tensor(X_val_seq, dtype=torch.float32).to(device)
+        lstm_probs = model(val_tensor).numpy().flatten()
 
-    # Denormalize: orig_x = (scaled_x - min_) / scale_
-    denormalized_preds = (np.array(val_preds) - min_close) / scale_close
+    test_df = df_clean.iloc[val_indices].copy().reset_index(drop=True)
+    test_df['lstm_prob'] = lstm_probs
 
-    # 4. Execute Vectorized Backtest Logics
-    trade_df = df.iloc[-len(denormalized_preds):].copy().reset_index(drop=True)
-    trade_df['predicted_target'] = denormalized_preds
+    high = test_df['high']
+    low = test_df['low']
+    close = test_df['close']
+    tr = np.maximum(high - low, np.maximum(np.abs(high - close.shift(1)), np.abs(low - close.shift(1))))
+    test_df['atr'] = tr.rolling(14, min_periods=5).mean().bfill()
+    test_df['ema'] = close.ewm(span=50, adjust=False).mean()
 
     starting_balance = 10000.0
+    balance = starting_balance
     risk_per_trade = 0.01
-    trade_returns = []
+    rr_ratio = 2.0
+    sl_buffer_ratio = 0.1
+    max_holding = 20
+    fill_window = 3
 
-    for i in range(3, len(trade_df)):
-        current_close = trade_df.loc[i, 'close']
-        current_low = trade_df.loc[i, 'low']
+    triggers_count = 0
+    trades = []
 
-        fvg_top = trade_df.loc[i-2, 'low']
-        fvg_bottom = trade_df.loc[i, 'high']
+    for i in range(2, len(test_df)):
+        bar_i = test_df.iloc[i]
+        bar_i2 = test_df.iloc[i - 2]
+        prob = bar_i['lstm_prob']
+        atr = bar_i['atr']
+        ema = bar_i['ema']
 
-        if fvg_top > fvg_bottom:
-            consequent_encroachment = fvg_bottom + ((fvg_top - fvg_bottom) / 2.0)
-            target = trade_df.loc[i, 'predicted_target']
+        # Bullish FVG
+        if bar_i['low'] > bar_i2['high']:
+            fvg_bottom = bar_i2['high']
+            fvg_top = bar_i['low']
+            gap_height = fvg_top - fvg_bottom
 
-            if current_low <= consequent_encroachment and target > current_close:
-                entry_price = consequent_encroachment
-                stop_loss = fvg_bottom
+            if gap_height >= 0.15 * atr and prob >= 0.48 and bar_i['close'] >= ema:
+                triggers_count += 1
+                ce = fvg_bottom + 0.5 * gap_height
+                sl = fvg_bottom - sl_buffer_ratio * gap_height
+                risk = ce - sl
 
-                if entry_price > stop_loss:
-                    risk = entry_price - stop_loss
-                    reward = target - entry_price
-                    r_multiple = reward / risk
+                if risk > 0:
+                    tp = ce + rr_ratio * risk
+                    filled = False
+                    fill_bar = -1
+                    for b in range(i + 1, min(i + fill_window + 1, len(test_df))):
+                        if test_df.iloc[b]['low'] <= ce:
+                            filled = True
+                            fill_bar = b
+                            break
 
-                    next_low = trade_df.loc[i+1, 'low'] if (i+1) < len(trade_df) else trade_df.loc[i, 'low']
-                    next_close = trade_df.loc[i+1, 'close'] if (i+1) < len(trade_df) else trade_df.loc[i, 'close']
+                    if filled and fill_bar > 0:
+                        outcome = 'timeout'
+                        pnl_r = 0.0
+                        for h in range(fill_bar, min(fill_bar + max_holding, len(test_df))):
+                            curr_bar = test_df.iloc[h]
+                            if curr_bar['low'] <= sl:
+                                outcome = 'sl'
+                                pnl_r = -1.0
+                                break
+                            if curr_bar['high'] >= tp:
+                                outcome = 'tp'
+                                pnl_r = rr_ratio
+                                break
 
-                    if next_low <= stop_loss:
-                        trade_returns.append(-risk_per_trade)
-                    else:
-                        actual_reward = next_close - entry_price
-                        actual_r = actual_reward / risk
-                        trade_returns.append(risk_per_trade * actual_r)
+                        trades.append({'outcome': outcome, 'pnl_r': pnl_r, 'return': pnl_r * risk_per_trade})
 
-    trade_returns = np.array(trade_returns)
-    if len(trade_returns) > 0:
-        win_rate = len(trade_returns[trade_returns > 0]) / len(trade_returns)
-        equity_curve = starting_balance * np.cumprod(1 + trade_returns)
-        max_dd = np.max(np.maximum.accumulate(equity_curve) - equity_curve) / np.maximum.accumulate(equity_curve).max()
+        # Bearish FVG
+        elif bar_i['high'] < bar_i2['low']:
+            fvg_top = bar_i2['low']
+            fvg_bottom = bar_i['high']
+            gap_height = fvg_top - fvg_bottom
 
-        winning_trades = len(trade_returns[trade_returns > 0])
-        losing_trades = len(trade_returns[trade_returns <= 0])
+            if gap_height >= 0.15 * atr and prob <= 0.52 and bar_i['close'] <= ema:
+                triggers_count += 1
+                ce = fvg_bottom + 0.5 * gap_height
+                sl = fvg_top + sl_buffer_ratio * gap_height
+                risk = sl - ce
 
-        print("\n==================================================")
-        print("          BROKER-ALIGNED BACKTEST SUMMARY")
-        print("==================================================")
-        print(f"* Total Evaluated Bars:     {len(val_preds)} (Out-of-Sample Partition)")
-        print(f"* Strategy Triggers (FVG):  {len(trade_returns)} Confluence Entries Matched")
-        print(f"* Winning Trades:           {winning_trades}")
-        print(f"* Losing Trades:            {losing_trades}")
-        print(f"* Strategy Win Rate:        {win_rate * 100:.2f}%")
-        print(f"* Net Return on Account:    +{((equity_curve[-1] / starting_balance) - 1) * 100:.2f}% (Starting Balance: ${starting_balance:,.2f})" if ((equity_curve[-1] / starting_balance) - 1) > 0 else f"* Net Return on Account:    {((equity_curve[-1] / starting_balance) - 1) * 100:.2f}% (Starting Balance: ${starting_balance:,.2f})")
-        print(f"* Maximum Drawdown:         -{max_dd * 100:.2f}%")
-        print("* Execution Constraints:    Contract Size = 10 | Min Stops = 50 pts")
+                if risk > 0:
+                    tp = ce - rr_ratio * risk
+                    filled = False
+                    fill_bar = -1
+                    for b in range(i + 1, min(i + fill_window + 1, len(test_df))):
+                        if test_df.iloc[b]['high'] >= ce:
+                            filled = True
+                            fill_bar = b
+                            break
+
+                    if filled and fill_bar > 0:
+                        outcome = 'timeout'
+                        pnl_r = 0.0
+                        for h in range(fill_bar, min(fill_bar + max_holding, len(test_df))):
+                            curr_bar = test_df.iloc[h]
+                            if curr_bar['high'] >= sl:
+                                outcome = 'sl'
+                                pnl_r = -1.0
+                                break
+                            if curr_bar['low'] <= tp:
+                                outcome = 'tp'
+                                pnl_r = rr_ratio
+                                break
+
+                        trades.append({'outcome': outcome, 'pnl_r': pnl_r, 'return': pnl_r * risk_per_trade})
+
+    n_trades = len(trades)
+    win_rate = 0.0
+    profit_factor = 0.0
+    total_r = 0.0
+    net_return = 0.0
+    max_dd = 0.0
+
+    if n_trades > 0:
+        trades_df = pd.DataFrame(trades)
+        wins = trades_df[trades_df['pnl_r'] > 0]
+        losses = trades_df[trades_df['pnl_r'] < 0]
+        win_rate = len(wins) / n_trades if n_trades > 0 else 0.0
+
+        gross_profit = wins['pnl_r'].sum()
+        gross_loss = abs(losses['pnl_r'].sum())
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+
+        total_r = trades_df['pnl_r'].sum()
+
+        equity_curve = [starting_balance]
+        for ret in trades_df['return']:
+            equity_curve.append(equity_curve[-1] * (1.0 + ret))
+
+        equity_curve = np.array(equity_curve)
+        peak = np.maximum.accumulate(equity_curve)
+        drawdowns = (peak - equity_curve) / peak
+        max_dd = np.max(drawdowns)
+        net_return = (equity_curve[-1] - starting_balance) / starting_balance
+
+    opt_str = f"L={lookback},H={hidden_size}"
+    print(f"[DONE] {filename:<22} | Opt: {opt_str:<10} | Trades: {n_trades:<5} | WR: {win_rate*100:5.1f}% | Total R: {total_r:+6.1f}R | Return: {net_return*100:+6.1f}%")
+
+    return {
+        'timeframe': filename,
+        'total_bars': len(test_df),
+        'triggers': triggers_count,
+        'trades': n_trades,
+        'win_rate': win_rate,
+        'profit_factor': profit_factor,
+        'total_r': total_r,
+        'net_return': net_return,
+        'max_dd': max_dd,
+        'opt_params': opt_str
+    }
+
+def main():
+    parser = argparse.ArgumentParser(description="Multi-threaded concurrent evaluation")
+    parser.add_argument("--mode", type=str, default="threads", choices=["threads", "sequential"], help="Execution mode")
+    parser.add_argument("--workers", type=int, default=4, help="Number of concurrent worker threads")
+    args = parser.parse_args()
+
+    files = [f for f in glob.glob('NasData/*.csv') if 'ticks' not in f.lower()]
+    files = sorted(files)
+
+    print(f"[INFO] Launching Multi-Threaded Grid Optimization and Backtest across {len(files)} timeframes (Mode: {args.mode}, Workers: {args.workers})...")
+    print("=" * 118)
+
+    results = []
+    if args.mode == "threads" and args.workers > 1:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            future_to_file = {executor.submit(process_single_timeframe, f): f for f in files}
+            for future in as_completed(future_to_file):
+                res = future.result()
+                results.append(res)
     else:
-        print("\n==================================================")
-        print("          BROKER-ALIGNED BACKTEST SUMMARY")
-        print("==================================================")
-        print(f"* Total Evaluated Bars:     {len(val_preds)} (Out-of-Sample Partition)")
-        print("* Strategy Triggers (FVG):  0 Confluence Entries Matched")
-        print("No trade setups met the FVG Consequent Encroachment confluence criteria in this validation slice.")
+        for f in files:
+            res = process_single_timeframe(f)
+            results.append(res)
 
-if __name__ == "__main__":
-    execute_pipeline()
+    results = sorted(results, key=lambda x: x['timeframe'])
+
+    print("\n\n=======================================================================================================================")
+    print("                                  GLOBAL MULTI-TIMEFRAME OPTIMIZATION AND BACKTEST RESULTS")
+    print("=======================================================================================================================")
+    print(f"{'Timeframe':<22} | {'Opt Config':<10} | {'Bars':<6} | {'Triggers':<8} | {'Trades':<6} | {'Win Rate':<8} | {'P.Factor':<8} | {'Total R':<8} | {'Return':<9} | {'Max DD':<8}")
+    print("-" * 118)
+    for r in results:
+        wr_str = f"{r['win_rate']*100:.1f}%"
+        pf_str = f"{r['profit_factor']:.2f}"
+        r_str = f"{r['total_r']:+.1f}R"
+        ret_str = f"{r['net_return']*100:+.2f}%"
+        dd_str = f"-{r['max_dd']*100:.1f}%"
+        opt_str = r.get('opt_params', 'N/A')
+        print(f"{r['timeframe']:<22} | {opt_str:<10} | {r['total_bars']:<6} | {r['triggers']:<8} | {r['trades']:<6} | {wr_str:<8} | {pf_str:<8} | {r_str:<8} | {ret_str:<9} | {dd_str:<8}")
+
+if __name__ == '__main__':
+    main()
