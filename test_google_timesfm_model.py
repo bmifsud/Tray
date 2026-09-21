@@ -1,10 +1,29 @@
 import unittest
+import os
+import tempfile
 import numpy as np
 import pandas as pd
 from unittest.mock import patch, MagicMock
-from google_timesfm_model import GoogleTimesFMForecaster, evaluate_timesfm_on_dataframe
+from google_timesfm_model import GoogleTimesFMForecaster, evaluate_timesfm_on_dataframe, load_env_file
 
 class TestGoogleTimesFMModel(unittest.TestCase):
+
+    def test_load_env_file_hf_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = os.path.join(temp_dir, '.env')
+            with open(env_file, 'w') as f:
+                f.write("HF_TOKEN=test_hf_token_12345\n")
+            
+            with patch('os.path.abspath', return_value=os.path.join(temp_dir, 'google_timesfm_model.py')):
+                with patch.dict(os.environ, {}, clear=False):
+                    if 'HF_TOKEN' in os.environ:
+                        del os.environ['HF_TOKEN']
+                    load_env_file()
+                    self.assertEqual(os.environ.get('HF_TOKEN'), 'test_hf_token_12345')
+
+    def test_env_hf_token_configured(self):
+        load_env_file()
+        self.assertIsNotNone(os.environ.get("HF_TOKEN"))
 
     def test_init(self):
         forecaster = GoogleTimesFMForecaster(horizon=5, context_len=100, hf_token="fake_token")
