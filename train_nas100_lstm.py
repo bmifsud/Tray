@@ -89,8 +89,8 @@ def train():
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # Training Loop with Early Stopping
-    epochs = 500
-    patience = 50
+    epochs = 100
+    patience = 100
     best_loss = float('inf')
     counter = 0
 
