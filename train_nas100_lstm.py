@@ -12,51 +12,36 @@ import copy
 import os
 
 warnings.filterwarnings('ignore')
-logging.getLogger("torch.onnx").setLevel(logging.ERROR)
+logging.getLogger('torch.onnx').setLevel(logging.ERROR)
 
-# Set random seed for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
 def compute_features(df):
-    """
-    Computes stationary, zero-centered features from OHLCV data.
-    Ensures model is scale-independent across all timeframes.
-    """
     close = df['close']
     open_p = df['open']
     high = df['high']
     low = df['low']
     vol = df['tick_volume']
 
-    # 1. Price Return of current candle
     df['ret1'] = (close - open_p) / (open_p + 1e-8)
-    
-    # 2. Normalized High-Low Range
     df['hl_range'] = (high - low) / (close + 1e-8)
-    
-    # 3. Upper Wick Ratio
     df['upper_wick'] = (high - np.maximum(open_p, close)) / (close + 1e-8)
-    
-    # 4. Lower Wick Ratio
     df['lower_wick'] = (np.minimum(open_p, close) - low) / (close + 1e-8)
     
-    # 5. Normalized Volume
     vol_mean = vol.rolling(20, min_periods=5).mean()
     vol_std = vol.rolling(20, min_periods=5).std()
     df['vol_norm'] = (vol - vol_mean) / (vol_std + 1e-8)
-    
-    # 6. Normalized RSI (14-period)
+
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=5).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=5).mean()
     rs = gain / (loss + 1e-9)
     rsi = 100 - (100 / (1 + rs))
-    df['rsi'] = (rsi - 50.0) / 50.0  # normalized to [-1, 1] range
+    df['rsi'] = (rsi - 50.0) / 50.0
 
-    # Target: 1 if next bar closes higher than current close, else 0
     df['target'] = (close.shift(-1) > close).astype(float)
-
     return df
 
 def create_sequences(X, Y, lookback=15):
@@ -88,114 +73,133 @@ class DirectionalLSTM(nn.Module):
         out = self.sigmoid(out)
         return out
 
-def train():
-    print("[INFO] Loading raw data from nas100_raw.csv...")
-    raw_df = pd.read_csv('nas100_raw.csv')
-
-    df = compute_features(raw_df.copy())
+def train_tf_dataset(df_raw, tf_name, optimize_grid=True):
+    set_seed(42)
+    df = compute_features(df_raw.copy())
     feature_cols = ['ret1', 'hl_range', 'upper_wick', 'lower_wick', 'vol_norm', 'rsi']
-    
+
     df_clean = df.dropna(subset=feature_cols + ['target']).reset_index(drop=True)
-    
-    if len(df_clean) < 60:
-        print("[WARN] Insufficient data to train LSTM. Skipping training.")
-        return False
+
+    if len(df_clean) < 100:
+        return None
 
     X_all = df_clean[feature_cols].values
     Y_all = df_clean['target'].values
 
-    print("[INFO] Enforcing strict chronological train/validation split (80/20)...")
     train_size = int(len(df_clean) * 0.8)
     X_train_raw = X_all[:train_size]
     Y_train_raw = Y_all[:train_size]
     X_test_raw = X_all[train_size:]
     Y_test_raw = Y_all[train_size:]
 
-    print("[INFO] Fitting Standard Scaler parameters strictly on training partition...")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_raw)
     X_test_scaled = scaler.transform(X_test_raw)
 
+    if optimize_grid and len(df_clean) >= 500:
+        param_grid = [
+            {'lookback': 15, 'hidden_size': 32, 'dropout': 0.2, 'lr': 0.002},
+            {'lookback': 25, 'hidden_size': 32, 'dropout': 0.2, 'lr': 0.002},
+            {'lookback': 15, 'hidden_size': 64, 'dropout': 0.3, 'lr': 0.001},
+            {'lookback': 10, 'hidden_size': 16, 'dropout': 0.1, 'lr': 0.005},
+        ]
+    else:
+        param_grid = [
+            {'lookback': 15, 'hidden_size': 32, 'dropout': 0.2, 'lr': 0.002}
+        ]
+
+    best_grid_val_loss = float('inf')
+    best_params = param_grid[0]
+    best_model_state = None
+
+    for idx, p in enumerate(param_grid):
+        lookback = p['lookback']
+        hidden_size = p['hidden_size']
+        dropout = p['dropout']
+        lr = p['lr']
+
+        if len(X_train_scaled) <= lookback or len(X_test_scaled) <= lookback:
+            continue
+
+        X_train, Y_train = create_sequences(X_train_scaled, Y_train_raw, lookback)
+        X_test, Y_test = create_sequences(X_test_scaled, Y_test_raw, lookback)
+
+        X_train_t = torch.tensor(X_train, dtype=torch.float32)
+        Y_train_t = torch.tensor(Y_train, dtype=torch.float32).unsqueeze(1)
+        X_test_t = torch.tensor(X_test, dtype=torch.float32)
+        Y_test_t = torch.tensor(Y_test, dtype=torch.float32).unsqueeze(1)
+
+        model = DirectionalLSTM(input_size=len(feature_cols), hidden_size=hidden_size, dropout=dropout)
+        criterion = nn.BCELoss()
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+        epochs = 20
+        patience = 6
+        cand_best_loss = float('inf')
+        cand_counter = 0
+        cand_state = None
+
+        batch_size = 128
+        dataset = torch.utils.data.TensorDataset(X_train_t, Y_train_t)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        for epoch in range(epochs):
+            model.train()
+            for batch_x, batch_y in dataloader:
+                optimizer.zero_grad()
+                preds = model(batch_x)
+                loss = criterion(preds, batch_y)
+                loss.backward()
+                optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                val_preds = model(X_test_t)
+                val_loss = criterion(val_preds, Y_test_t).item()
+
+            if val_loss < cand_best_loss:
+                cand_best_loss = val_loss
+                cand_counter = 0
+                cand_state = copy.deepcopy(model.state_dict())
+            else:
+                cand_counter += 1
+
+            if cand_counter >= patience:
+                break
+
+        if cand_best_loss < best_grid_val_loss:
+            best_grid_val_loss = cand_best_loss
+            best_params = p
+            best_model_state = cand_state
+
+    lookback = best_params['lookback']
+    hidden_size = best_params['hidden_size']
+
+    os.makedirs('models', exist_ok=True)
     scaler_params = {
         'feature_names': feature_cols,
         'mean_': scaler.mean_.tolist(),
         'scale_': scaler.scale_.tolist(),
-        'lookback': 15
+        'lookback': lookback,
+        'hidden_size': hidden_size
     }
-    with open('scaler_params.json', 'w') as f:
+    
+    clean_tf = os.path.splitext(tf_name)[0]
+    with open(f'models/scaler_params_{clean_tf}.json', 'w') as f:
         json.dump(scaler_params, f, indent=2)
-    print("       -> Serialized feature normalization parameters to 'scaler_params.json'.")
 
-    lookback = 15
-    X_train, Y_train = create_sequences(X_train_scaled, Y_train_raw, lookback)
-    X_test, Y_test = create_sequences(X_test_scaled, Y_test_raw, lookback)
+    if best_model_state is not None:
+        torch.save(best_model_state, f'models/best_model_{clean_tf}.pth')
 
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    Y_train_t = torch.tensor(Y_train, dtype=torch.float32).unsqueeze(1)
-    X_test_t = torch.tensor(X_test, dtype=torch.float32)
-    Y_test_t = torch.tensor(Y_test, dtype=torch.float32).unsqueeze(1)
+    final_model = DirectionalLSTM(input_size=len(feature_cols), hidden_size=hidden_size)
+    if best_model_state is not None:
+        final_model.load_state_dict(best_model_state)
+    final_model.eval()
 
-    print(f"[INFO] Initializing Directional LSTM (Inputs: {len(feature_cols)}, Hidden: 32, Dropout: 0.2)...")
-    model = DirectionalLSTM(input_size=len(feature_cols), hidden_size=32, dropout=0.2)
-    criterion = nn.BCELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=0.002, weight_decay=1e-4)
-
-    epochs = 40
-    patience = 12
-    best_loss = float('inf')
-    best_state_dict = copy.deepcopy(model.state_dict())
-    counter = 0
-
-    for epoch in range(epochs):
-        model.train()
-        optimizer.zero_grad()
-        preds = model(X_train_t)
-        loss = criterion(preds, Y_train_t)
-        loss.backward()
-        optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            val_preds = model(X_test_t)
-            val_loss = criterion(val_preds, Y_test_t)
-
-        val_loss_val = val_loss.item()
-        saved_msg = ""
-        if val_loss_val < best_loss:
-            best_loss = val_loss_val
-            counter = 0
-            best_state_dict = copy.deepcopy(model.state_dict())
-            saved_msg = " (Saved Best Model)"
-        else:
-            counter += 1
-
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            print(f"Epoch {epoch+1:02d}/{epochs} | Train Loss: {loss.item():.4f} | Val Loss: {val_loss_val:.4f}{saved_msg}")
-
-        if counter >= patience:
-            print(f"\n[INFO] Early stopping triggered at epoch {epoch+1}. Best Val Loss: {best_loss:.4f}")
-            break
-
-    # Restore best weights and save to disk
-    model.load_state_dict(best_state_dict)
-    torch.save(best_state_dict, 'best_model.pth')
-    model.eval()
-
-    with torch.no_grad():
-        test_probs = model(X_test_t).numpy().flatten()
-
-    binary_preds = (test_probs >= 0.50).astype(float)
-    acc = accuracy_score(Y_test, binary_preds)
-    majority_baseline = max(np.mean(Y_test), 1.0 - np.mean(Y_test))
-    brier_model = brier_score_loss(Y_test, test_probs)
-    brier_naive = brier_score_loss(Y_test, np.full_like(Y_test, 0.5))
-
-    # Export to ONNX
     dummy_input = torch.randn(1, lookback, len(feature_cols))
-    export_status = "SUCCESS ('nas100_lstm.onnx')"
     try:
         torch.onnx.export(
-            model, dummy_input, "nas100_lstm.onnx",
+            final_model, dummy_input, f'models/nas100_lstm_{clean_tf}.onnx',
             export_params=True,
             do_constant_folding=True,
             dynamo=False,
@@ -203,16 +207,13 @@ def train():
             output_names=['output']
         )
     except Exception as e:
-        export_status = f"FAILED ({str(e)})"
+        pass
 
-    print("\n==================================================")
-    print("              MODEL VALIDATION METRICS")
-    print("==================================================")
-    print(f"* Out-of-Sample Accuracy:        {acc * 100:.2f}%")
-    print(f"* Majority Class Baseline:        {majority_baseline * 100:.2f}%")
-    print(f"* Model Brier Score:              {brier_model:.5f} (vs Naive 0.5: {brier_naive:.5f})")
-    print(f"* ONNX Export Status:             {export_status}\n")
-    return True
-
-if __name__ == '__main__':
-    train()
+    return {
+        'scaler_params': scaler_params,
+        'model_state': best_model_state,
+        'best_params': best_params,
+        'val_loss': best_grid_val_loss,
+        'df_clean': df_clean,
+        'scaler': scaler
+    }

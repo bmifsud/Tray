@@ -132,9 +132,10 @@ def resolve_symbol(requested_symbol=None):
     print("[ERROR] Could not find any NAS100 / Nasdaq symbol in broker catalog.")
     return None
 
-def download_bars(symbol, timeframe_key, count=50000, output_dir="NasData"):
+def download_bars(symbol, timeframe_key, count=100000, output_dir="NasData"):
     """
     Downloads historical OHLCV bar data from MT5 and formats as CSV.
+    For M45 (which MT5 does not natively support), resamples M15 bars into authentic 45-minute candles.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -143,41 +144,72 @@ def download_bars(symbol, timeframe_key, count=50000, output_dir="NasData"):
         return None
 
     tf_enum, tf_label = TIMEFRAME_MAP[timeframe_key]
-    print(f"\n[INFO] Downloading {count} bars for {symbol} on {timeframe_key} ({tf_label})...")
+    print(f"\n[INFO] Downloading up to {count:,} bars for {symbol} on {timeframe_key} ({tf_label})...")
 
-    rates = mt5.copy_rates_from_pos(symbol, tf_enum, 0, count)
-    if rates is None or len(rates) == 0:
-        err = mt5.last_error()
-        print(f"[ERROR] Failed to fetch rates for {symbol} ({timeframe_key}). Error: {err}")
-        return None
+    if timeframe_key == 'M45':
+        m15_count = min(count * 3, 300000)
+        print(f"       -> M45 not native to MT5; fetching {m15_count:,} M15 bars to resample into 45-minute candles...")
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, m15_count)
+        if rates is None or len(rates) == 0:
+            err = mt5.last_error()
+            print(f"[ERROR] Failed to fetch M15 rates for M45 resampling. Error: {err}")
+            return None
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        df = df.set_index('time')
+        # Resample to 45T
+        resampled = df.resample('45min', origin='start_day').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'tick_volume': 'sum',
+            'spread': 'mean',
+            'real_volume': 'sum'
+        }).dropna(subset=['open', 'close']).reset_index()
+        df = resampled[['time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']]
+        df = df.sort_values('time').reset_index(drop=True)
+        if len(df) > count:
+            df = df.iloc[-count:].reset_index(drop=True)
+    else:
+        rates = mt5.copy_rates_from_pos(symbol, tf_enum, 0, count)
+        if rates is None or len(rates) == 0:
+            err = mt5.last_error()
+            print(f"[ERROR] Failed to fetch rates for {symbol} ({timeframe_key}). Error: {err}")
+            return None
 
-    df = pd.DataFrame(rates)
-    # Convert POSIX timestamp to UTC datetime
-    df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
-    df = df.rename(columns={'tick_volume': 'tick_volume'})
-
-    # Keep standard pipeline schema
-    df = df[['time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']]
-    df = df.sort_values('time').reset_index(drop=True)
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        df = df[['time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']]
+        df = df.sort_values('time').reset_index(drop=True)
 
     filename = f"NQ_in_{tf_label}.csv"
     output_path = os.path.join(output_dir, filename)
     df.to_csv(output_path, index=False)
 
-    print(f"[SUCCESS] Saved {len(df)} bars to: {output_path}")
+    print(f"[SUCCESS] Saved {len(df):,} bars to: {output_path}")
     print(f"          Date Range: {df['time'].iloc[0]} -> {df['time'].iloc[-1]}")
     return output_path
 
-def download_ticks(symbol, count=100000, output_dir="NasData"):
+def download_ticks(symbol, count=500000, output_dir="NasData"):
     """
     Downloads high-resolution tick data from MT5.
     """
     os.makedirs(output_dir, exist_ok=True)
-    print(f"\n[INFO] Downloading {count} ticks for {symbol}...")
+    print(f"\n[INFO] Downloading up to {count:,} ticks for {symbol}...")
 
-    # Download from current time backwards
     now = datetime.datetime.now(datetime.timezone.utc)
-    ticks = mt5.copy_ticks_from(symbol, now, count, mt5.COPY_TICKS_ALL)
+    # Estimate days needed based on typical NAS100 tick volume (~150,000-250,000 ticks per active trading day)
+    days_back = max(3, int(count / 150000 * 2) + 3)
+    start_time = now - datetime.timedelta(days=days_back)
+
+    print(f"       -> Querying broker tick range: {start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC to now...")
+    ticks = mt5.copy_ticks_range(symbol, start_time, now, mt5.COPY_TICKS_ALL)
+
+    # If range returned fewer or failed, fallback to copy_ticks_from
+    if ticks is None or len(ticks) == 0:
+        print(f"[WARN] copy_ticks_range returned no ticks, falling back to copy_ticks_from...")
+        ticks = mt5.copy_ticks_from(symbol, start_time, count, mt5.COPY_TICKS_ALL)
 
     if ticks is None or len(ticks) == 0:
         err = mt5.last_error()
@@ -188,11 +220,16 @@ def download_ticks(symbol, count=100000, output_dir="NasData"):
     # Convert millisecond timestamp to UTC datetime
     df['time'] = pd.to_datetime(df['time_msc'], unit='ms', utc=True)
 
+    # Sort and take the latest `count` ticks
+    df = df.sort_values('time_msc').reset_index(drop=True)
+    if len(df) > count:
+        df = df.iloc[-count:].reset_index(drop=True)
+
     filename = f"{symbol.replace('.', '_')}_ticks.csv"
     output_path = os.path.join(output_dir, filename)
     df.to_csv(output_path, index=False)
 
-    print(f"[SUCCESS] Saved {len(df)} ticks to: {output_path}")
+    print(f"[SUCCESS] Saved {len(df):,} ticks to: {output_path}")
     print(f"          Date Range: {df['time'].iloc[0]} -> {df['time'].iloc[-1]}")
     return output_path
 
@@ -200,9 +237,9 @@ def main():
     parser = argparse.ArgumentParser(description="Download NAS100 Bar and Tick Data directly from MetaTrader 5.")
     parser.add_argument("--symbol", type=str, default=None, help="Broker symbol name (default: auto-detect e.g. NAS100, USTEC, US100)")
     parser.add_argument("--type", type=str, choices=['bars', 'ticks', 'both'], default='both', help="Data type to download: bars, ticks, or both (default: both)")
-    parser.add_argument("--timeframe", type=str, default="M3", help=f"Timeframe for bar data ({list(TIMEFRAME_MAP.keys())} or 'all')")
-    parser.add_argument("--bars", type=int, default=50000, help="Number of bars to download (default: 50000)")
-    parser.add_argument("--ticks", type=int, default=100000, help="Number of ticks to download (default: 100000)")
+    parser.add_argument("--timeframe", type=str, default="all", help=f"Timeframe for bar data ({list(TIMEFRAME_MAP.keys())} or 'all')")
+    parser.add_argument("--bars", type=int, default=100000, help="Number of bars to download (default: 100000)")
+    parser.add_argument("--ticks", type=int, default=500000, help="Number of ticks to download (default: 500000)")
     parser.add_argument("--output_dir", type=str, default="NasData", help="Output directory to save CSVs (default: NasData)")
     parser.add_argument("--path", type=str, default=None, help="Path to terminal64.exe")
     parser.add_argument("--login", type=str, default=None, help="MT5 Account Login Number")
@@ -233,10 +270,13 @@ def main():
                 saved_bar_file = download_bars(symbol, tf_clean, count=args.bars, output_dir=args.output_dir)
 
             # If requested, update nas100_raw.csv for immediate model training
-            if args.update_raw and saved_bar_file and os.path.exists(saved_bar_file):
-                raw_df = pd.read_csv(saved_bar_file)
-                raw_df[['time', 'open', 'high', 'low', 'close', 'tick_volume']].to_csv('nas100_raw.csv', index=False)
-                print(f"\n[INFO] Successfully updated 'nas100_raw.csv' with latest MT5 data for training pipeline.")
+            if args.update_raw:
+                m3_file = os.path.join(args.output_dir, "NQ_in_3_minute.csv")
+                target_source = m3_file if os.path.exists(m3_file) else saved_bar_file
+                if target_source and os.path.exists(target_source):
+                    raw_df = pd.read_csv(target_source)
+                    raw_df[['time', 'open', 'high', 'low', 'close', 'tick_volume']].to_csv('nas100_raw.csv', index=False)
+                    print(f"\n[INFO] Successfully updated 'nas100_raw.csv' with latest MT5 data (from {os.path.basename(target_source)}, {len(raw_df):,} bars) for training pipeline.")
 
         # 4. Download Tick Data
         if args.type in ['ticks', 'both']:
