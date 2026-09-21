@@ -1,5 +1,5 @@
-Model MSE: 0.507553
-Naive Baseline MSE: 0.000558
+Model MSE: 0.082433
+Naive Baseline MSE: 0.152985
 [torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`...
 [torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`... ✅
 [torch.onnx] Run decompositions...
@@ -14,4 +14,7 @@ Model exported to nas100_lstm.onnx
 === STEP 2: Running Evaluation & Backtest Analysis ===
 
 --- Backtest Results Summary ---
-No trade setups met the FVG Consequent Encroachment confluence criteria in this validation slice.
+Total Trades Executed: 21
+Strategy Win Rate:     23.81%
+Net Return:            -28.99%
+Max Drawdown:          8.15%

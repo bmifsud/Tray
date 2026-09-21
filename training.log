@@ -1,5 +1,5 @@
-Model MSE: 0.507553
-Naive Baseline MSE: 0.000558
+Model MSE: 0.086178
+Naive Baseline MSE: 0.179147
 [torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`...
 [torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`... ✅
 [torch.onnx] Run decompositions...

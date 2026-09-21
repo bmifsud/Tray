@@ -143,22 +143,63 @@ void OnTick()
          double sl = fvg_bottom - (fvg_top - fvg_bottom); // SL below FVG
          double tp = predicted_close;
 
-         double risk_amount = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPercent / 100.0);
-         double sl_distance = current_close - sl;
-         double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-         double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         // --- 1. Position Sizing & Risk Management (Broker Aligned) ---
+            double risk_percent = InpRiskPercent / 100.0;
+            double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+            double risk_amount = account_balance * risk_percent;
 
-         if(sl_distance > 0 && tick_value > 0 && tick_size > 0)
-           {
-            double volume = NormalizeDouble(risk_amount / ((sl_distance / tick_size) * tick_value), 2);
-            double min_vol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-            if(volume < min_vol) volume = min_vol;
+            // Enforce broker Stops Level (Minimum 50 points away from current price)
+            double min_stops_level = 50 * _Point;
+            double stop_loss = sl;
+            if((current_close - stop_loss) < min_stops_level)
+            {
+               stop_loss = current_close - min_stops_level;
+            }
 
-            // For backtesting purpose, we can just place a market order,
-            // or a limit order at CE. The prompt says "trading off their 50% Consequent Encroachment level".
-            // Let's place a Buy Limit at CE.
-            trade.BuyLimit(volume, ce, _Symbol, sl, tp);
-           }
+            // Calculate lot size using Contract Size = 10
+            double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+            double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+            double contract_size = 10.0; // Per broker specification image
+
+            double sl_distance_points = (current_close - stop_loss) / _Point;
+            double calculated_volume = risk_amount / (sl_distance_points * tick_value * contract_size);
+
+            // Normalize volume to broker limits (Min: 0.01, Max: 50.0, Step: 0.01)
+            double min_volume = 0.01;
+            double max_volume = 50.0;
+            double volume_step = 0.01;
+
+            double final_volume = MathRound(calculated_volume / volume_step) * volume_step;
+            if (final_volume < min_volume) final_volume = min_volume;
+            if (final_volume > max_volume) final_volume = max_volume;
+
+            // --- 2. Trade Request Formulation ---
+            MqlTradeRequest request = {};
+            MqlTradeResult  result  = {};
+
+            request.action       = TRADE_ACTION_PENDING; // Buy Limit
+            request.symbol       = _Symbol;
+            request.volume       = final_volume;
+            request.type         = ORDER_TYPE_BUY_LIMIT;
+            request.price        = NormalizeDouble(ce, _Digits);
+            request.sl           = NormalizeDouble(stop_loss, _Digits);
+            request.tp           = NormalizeDouble(predicted_close, _Digits);
+            request.deviation    = 10;
+            request.magic        = 123456;
+            request.comment      = "LSTM_FVG_Contract10";
+            request.type_filling = ORDER_FILLING_IOC;
+
+            // --- 3. Order Execution ---
+            ResetLastError();
+            if(!OrderSend(request, result))
+            {
+                PrintFormat("Execution Failed | Error Code: %d | Retcode: %d", GetLastError(), result.retcode);
+            }
+            else
+            {
+                PrintFormat("Position Executed | Ticket: %d | Volume: %.2f | SL: %.2f | TP: %.2f",
+                            result.deal, final_volume, request.sl, request.tp);
+            }
         }
      }
    else if(rates[0].high < rates[2].low) // Bearish FVG
@@ -172,19 +213,63 @@ void OnTick()
          double sl = fvg_top + (fvg_top - fvg_bottom);
          double tp = predicted_close;
 
-         double risk_amount = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPercent / 100.0);
-         double sl_distance = sl - current_close;
-         double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-         double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         // --- 1. Position Sizing & Risk Management (Broker Aligned) ---
+            double risk_percent = InpRiskPercent / 100.0;
+            double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+            double risk_amount = account_balance * risk_percent;
 
-         if(sl_distance > 0 && tick_value > 0 && tick_size > 0)
-           {
-            double volume = NormalizeDouble(risk_amount / ((sl_distance / tick_size) * tick_value), 2);
-            double min_vol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-            if(volume < min_vol) volume = min_vol;
+            // Enforce broker Stops Level (Minimum 50 points away from current price)
+            double min_stops_level = 50 * _Point;
+            double stop_loss = sl;
+            if((stop_loss - current_close) < min_stops_level)
+            {
+               stop_loss = current_close + min_stops_level;
+            }
 
-            trade.SellLimit(volume, ce, _Symbol, sl, tp);
-           }
+            // Calculate lot size using Contract Size = 10
+            double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+            double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+            double contract_size = 10.0; // Per broker specification image
+
+            double sl_distance_points = (stop_loss - current_close) / _Point;
+            double calculated_volume = risk_amount / (sl_distance_points * tick_value * contract_size);
+
+            // Normalize volume to broker limits (Min: 0.01, Max: 50.0, Step: 0.01)
+            double min_volume = 0.01;
+            double max_volume = 50.0;
+            double volume_step = 0.01;
+
+            double final_volume = MathRound(calculated_volume / volume_step) * volume_step;
+            if (final_volume < min_volume) final_volume = min_volume;
+            if (final_volume > max_volume) final_volume = max_volume;
+
+            // --- 2. Trade Request Formulation ---
+            MqlTradeRequest request = {};
+            MqlTradeResult  result  = {};
+
+            request.action       = TRADE_ACTION_PENDING; // Sell Limit
+            request.symbol       = _Symbol;
+            request.volume       = final_volume;
+            request.type         = ORDER_TYPE_SELL_LIMIT;
+            request.price        = NormalizeDouble(ce, _Digits);
+            request.sl           = NormalizeDouble(stop_loss, _Digits);
+            request.tp           = NormalizeDouble(predicted_close, _Digits);
+            request.deviation    = 10;
+            request.magic        = 123456;
+            request.comment      = "LSTM_FVG_Contract10";
+            request.type_filling = ORDER_FILLING_IOC;
+
+            // --- 3. Order Execution ---
+            ResetLastError();
+            if(!OrderSend(request, result))
+            {
+                PrintFormat("Execution Failed | Error Code: %d | Retcode: %d", GetLastError(), result.retcode);
+            }
+            else
+            {
+                PrintFormat("Position Executed | Ticket: %d | Volume: %.2f | SL: %.2f | TP: %.2f",
+                            result.deal, final_volume, request.sl, request.tp);
+            }
         }
      }
 
