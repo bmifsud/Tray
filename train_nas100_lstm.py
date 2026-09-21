@@ -1,6 +1,11 @@
 import pandas as pd
 import numpy as np
 import json
+import datetime
+import time
+import glob
+import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,9 +19,6 @@ import os
 warnings.filterwarnings('ignore')
 logging.getLogger('torch.onnx').setLevel(logging.ERROR)
 
-def set_seed(seed=42):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
 
 def compute_features(df):
     close = df['close']
@@ -45,11 +47,14 @@ def compute_features(df):
     return df
 
 def create_sequences(X, Y, lookback=15):
-    xs, ys = [], []
-    for i in range(len(X) - lookback):
-        xs.append(X[i:(i + lookback)])
-        ys.append(Y[i + lookback])
-    return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+    n = len(X)
+    if n <= lookback:
+        return np.empty((0, lookback, X.shape[1]), dtype=np.float32), np.empty((0,), dtype=np.float32)
+    shape = (n - lookback, lookback, X.shape[1])
+    strides = (X.strides[0], X.strides[0], X.strides[1])
+    xs = np.lib.stride_tricks.as_strided(X, shape=shape, strides=strides).copy()
+    ys = Y[lookback:n]
+    return xs.astype(np.float32), ys.astype(np.float32)
 
 class DirectionalLSTM(nn.Module):
     def __init__(self, input_size=6, hidden_size=32, num_layers=1, dropout=0.2):
@@ -64,17 +69,16 @@ class DirectionalLSTM(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
+        out, _ = self.lstm(x)
         out = self.dropout(out[:, -1, :])
         out = self.relu(self.fc1(out))
         out = self.fc2(out)
         out = self.sigmoid(out)
         return out
 
-def train_tf_dataset(df_raw, tf_name, optimize_grid=True):
-    set_seed(42)
+def train_tf_dataset(df_raw, tf_name, optimize_grid=True, seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     df = compute_features(df_raw.copy())
     feature_cols = ['ret1', 'hl_range', 'upper_wick', 'lower_wick', 'vol_norm', 'rsi']
 
@@ -112,6 +116,8 @@ def train_tf_dataset(df_raw, tf_name, optimize_grid=True):
     best_params = param_grid[0]
     best_model_state = None
 
+    seq_cache = {}
+
     for idx, p in enumerate(param_grid):
         lookback = p['lookback']
         hidden_size = p['hidden_size']
@@ -121,13 +127,17 @@ def train_tf_dataset(df_raw, tf_name, optimize_grid=True):
         if len(X_train_scaled) <= lookback or len(X_test_scaled) <= lookback:
             continue
 
-        X_train, Y_train = create_sequences(X_train_scaled, Y_train_raw, lookback)
-        X_test, Y_test = create_sequences(X_test_scaled, Y_test_raw, lookback)
+        if lookback not in seq_cache:
+            X_train, Y_train = create_sequences(X_train_scaled, Y_train_raw, lookback)
+            X_test, Y_test = create_sequences(X_test_scaled, Y_test_raw, lookback)
 
-        X_train_t = torch.tensor(X_train, dtype=torch.float32)
-        Y_train_t = torch.tensor(Y_train, dtype=torch.float32).unsqueeze(1)
-        X_test_t = torch.tensor(X_test, dtype=torch.float32)
-        Y_test_t = torch.tensor(Y_test, dtype=torch.float32).unsqueeze(1)
+            X_train_t = torch.tensor(X_train, dtype=torch.float32)
+            Y_train_t = torch.tensor(Y_train, dtype=torch.float32).unsqueeze(1)
+            X_test_t = torch.tensor(X_test, dtype=torch.float32)
+            Y_test_t = torch.tensor(Y_test, dtype=torch.float32).unsqueeze(1)
+            seq_cache[lookback] = (X_train_t, Y_train_t, X_test_t, Y_test_t)
+        else:
+            X_train_t, Y_train_t, X_test_t, Y_test_t = seq_cache[lookback]
 
         model = DirectionalLSTM(input_size=len(feature_cols), hidden_size=hidden_size, dropout=dropout)
         criterion = nn.BCELoss()
@@ -191,10 +201,20 @@ def train_tf_dataset(df_raw, tf_name, optimize_grid=True):
     if best_model_state is not None:
         torch.save(best_model_state, f'models/best_model_{clean_tf}.pth')
 
-    final_model = DirectionalLSTM(input_size=len(feature_cols), hidden_size=hidden_size)
+    final_model = DirectionalLSTM(input_size=len(feature_cols), hidden_size=best_params["hidden_size"], dropout=best_params["dropout"])
     if best_model_state is not None:
         final_model.load_state_dict(best_model_state)
     final_model.eval()
+
+    if lookback in seq_cache:
+        _, _, X_test_t, Y_test_t = seq_cache[lookback]
+    else:
+        X_test_seq, Y_test_seq = create_sequences(X_test_scaled, Y_test_raw, lookback)
+        X_test_t = torch.tensor(X_test_seq, dtype=torch.float32)
+        Y_test_t = torch.tensor(Y_test_seq, dtype=torch.float32).unsqueeze(1)
+    with torch.no_grad():
+        final_val_preds = final_model(X_test_t)
+        final_val_acc = ((final_val_preds > 0.5).float() == Y_test_t).float().mean().item() if len(Y_test_t) > 0 else 0.0
 
     dummy_input = torch.randn(1, lookback, len(feature_cols))
     try:
@@ -212,8 +232,157 @@ def train_tf_dataset(df_raw, tf_name, optimize_grid=True):
     return {
         'scaler_params': scaler_params,
         'model_state': best_model_state,
+
         'best_params': best_params,
         'val_loss': best_grid_val_loss,
+        'val_acc': final_val_acc,
         'df_clean': df_clean,
         'scaler': scaler
     }
+
+def ensure_data_available():
+    os.makedirs("NasData", exist_ok=True)
+    csv_files = glob.glob("NasData/*.csv")
+    valid_files = []
+    for f in csv_files:
+        if "ticks" in f.lower():  # Skip tick data for bar-based training
+            continue
+        try:
+            df = pd.read_csv(f, nrows=5)
+            if {"open", "high", "low", "close"}.issubset(df.columns) or {"datetime", "time"}.issubset(df.columns):
+                valid_files.append(f)
+        except:
+            pass
+
+    if valid_files:
+        return valid_files
+
+    print("[INFO] No valid data found in NasData/. Attempting auto-fetch via MT5 downloader...")
+    try:
+        import download_nas100_mt5 as mt5_dl
+        if mt5_dl.initialize_mt5():
+            print("[INFO] Attempting to download D1, H1, H4 bar data from MT5...")
+            for tf_key in ["D1", "H1", "H4"]:
+                mt5_dl.download_bars("NAS100", tf_key, count=20000, output_dir="NasData")
+    except Exception as e:
+        print(f"[WARN] MT5 auto-download unavailable or failed: {e}")
+
+    # Re-check for files after attempted download
+    csv_files = glob.glob("NasData/*.csv")
+    valid_files = [f for f in csv_files if "ticks" not in f.lower() and os.path.getsize(f) > 100] # Check file size too
+    if valid_files:
+        return valid_files
+
+    print("[INFO] Generating robust synthetic NAS100 OHLC dataset for fallback...")
+    np.random.seed(42)
+    n_bars = 5000
+    dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=n_bars, freq="1h")
+    price = 15000.0 + np.cumsum(np.random.normal(0, 10, n_bars))
+    syn_df = pd.DataFrame({
+        "time": dates,
+        "open": price + np.random.normal(0, 5, n_bars),
+        "high": price + np.random.uniform(2, 15, n_bars),
+        "low": price - np.random.uniform(2, 15, n_bars),
+        "close": price + np.random.normal(0, 5, n_bars),
+        "tick_volume": np.random.randint(1000, 50000, n_bars)
+    })
+    fallback_path = "NasData/NQ_in_1_hour_synthetic.csv"
+    syn_df.to_csv(fallback_path, index=False)
+    print(f"[SUCCESS] Created fallback dataset at {fallback_path}")
+    return [fallback_path]
+
+
+if __name__ == '__main__':
+    start_time = time.time()
+    csv_files = ensure_data_available() # Call the new function
+    
+    print(f"\n[INFO] Starting concurrent standalone training across {len(csv_files)} datasets...")
+    print("=" * 120)
+    print(f"{'Dataset / Timeframe':<28} | {'Status':<8} | {'Bars':<6} | {'Best Opt Config':<22} | {'Val Loss':<10} | {'LSTM Acc':<9} | {'TimesFM Acc':<11} | {'Time (s)':<8}")
+    print("-" * 120)
+
+    results = []
+    
+    def train_file(raw_path):
+        t0 = time.time()
+        filename = os.path.basename(raw_path)
+        try:
+            df_raw = pd.read_csv(raw_path)
+            if 'datetime' in df_raw.columns:
+                df_raw = df_raw.rename(columns={'datetime': 'time', 'volume': 'tick_volume'})
+            required_cols = {'open', 'high', 'low', 'close'}
+            if not required_cols.issubset(df_raw.columns):
+                return {'filename': filename, 'status': 'SKIP', 'bars': 0, 'params': 'Missing OHLC', 'val_loss': 0.0, 'val_acc': 0.0, 'time': 0.0}
+            
+            res = train_tf_dataset(df_raw, filename)
+            dur = time.time() - t0
+            
+            # Google TimesFM zero-shot evaluation
+            tfm_acc = 0.0
+            try:
+                from google_timesfm_model import evaluate_timesfm_on_dataframe
+                tfm_res = evaluate_timesfm_on_dataframe(df_raw, forecast_horizon=10, test_windows=5)
+                tfm_acc = tfm_res.get('directional_accuracy', 0.0)
+            except Exception:
+                pass
+
+            if res:
+                p = res['best_params']
+                cfg_str = f"L={p['lookback']}, H={p['hidden_size']}, DR={p['dropout']:.1f}, LR={p['lr']}"
+                output_res = {
+                    'filename': filename,
+                    'status': 'DONE',
+                    'bars': len(res['df_clean']),
+                    'params': cfg_str,
+                    'val_loss': res['val_loss'],
+                    'val_acc': res['val_acc'],
+                    'tfm_acc': tfm_acc,
+                    'time': dur
+                }
+            else:
+                output_res = {'filename': filename, 'status': 'LOW_DATA', 'bars': len(df_raw), 'params': 'N/A', 'val_loss': 0.0, 'val_acc': 0.0, 'tfm_acc': tfm_acc, 'time': dur}
+
+            # Explicit resource cleanup and garbage collection
+            del df_raw
+            if res:
+                del res
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            return output_res
+        except Exception as e:
+            return {'filename': filename, 'status': 'ERROR', 'bars': 0, 'params': str(e), 'val_loss': 0.0, 'val_acc': 0.0, 'tfm_acc': 0.0, 'time': time.time() - t0}
+
+    with ThreadPoolExecutor(max_workers=min(len(csv_files), os.cpu_count() or 4)) as executor:
+        futures = {executor.submit(train_file, f): f for f in csv_files}
+        for future in as_completed(futures):
+            r = future.result()
+            results.append(r)
+            status_col = r['status']
+            bars_col = str(r['bars'])
+            cfg_col = r['params']
+            loss_col = f"{r['val_loss']:.4f}" if r['val_loss'] > 0 else "-"
+            acc_col = f"{r['val_acc']*100:.1f}%" if r['val_acc'] > 0 else "-"
+            tfm_col = f"{r['tfm_acc']:.1f}%" if r.get('tfm_acc', 0) > 0 else "-"
+            time_col = f"{r['time']:.1f}s"
+            print(f"{r['filename']:<28} | {status_col:<8} | {bars_col:<6} | {cfg_col:<22} | {loss_col:<10} | {acc_col:<9} | {tfm_col:<11} | {time_col:<8}")
+
+    print("=" * 120)
+    successful = [r for r in results if r['status'] == 'DONE']
+    if successful:
+        avg_loss = sum(r['val_loss'] for r in successful) / len(successful)
+        avg_acc = sum(r['val_acc'] for r in successful) / len(successful)
+        tfm_accs = [r['tfm_acc'] for r in successful if r.get('tfm_acc', 0) > 0]
+        avg_tfm_acc = sum(tfm_accs) / len(tfm_accs) if tfm_accs else 0.0
+        total_time = time.time() - start_time
+        print(f"\n  CONSOLIDATED TRAINING & FORECASTING SUMMARY:")
+        print(f"  Successfully Processed : {len(successful)} / {len(results)} datasets")
+        print(f"  Average LSTM Val Loss  : {avg_loss:.4f}")
+        print(f"  Average LSTM Accuracy  : {avg_acc*100:.1f}%")
+        print(f"  Average TimesFM Acc    : {avg_tfm_acc:.1f}%")
+        print(f"  Total Wall Time        : {total_time:.2f}s")
+        print(f"  Artifacts Saved To     : ./models/")
+    else:
+        print("\n[WARN] No datasets successfully trained.")
+    print("=" * 120)

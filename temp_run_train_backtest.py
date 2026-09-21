@@ -1,5 +1,4 @@
 import os
-import gc
 import json
 import argparse
 import numpy as np
@@ -8,145 +7,6 @@ import torch
 import glob
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from train_nas100_lstm import train_tf_dataset, DirectionalLSTM, compute_features
-from google_timesfm_model import GoogleTimesFMForecaster
-def run_fvg_backtest(test_df, lstm_probs, tfm_signals=None, mode='ensemble'):
-    """
-    Backtests ICT Fair Value Gap (FVG) execution strategy with given ML signals.
-    Modes:
-      - 'lstm': uses only LSTM probability threshold
-      - 'timesfm': uses only TimesFM directional signal
-      - 'ensemble': requires agreement between LSTM and TimesFM
-    """
-    _close = test_df['close'].values
-    _high  = test_df['high'].values
-    _low   = test_df['low'].values
-    N = len(test_df)
-    
-    if N < 20:
-        return {'triggers': 0, 'trades': 0, 'win_rate': 0.0, 'profit_factor': 0.0, 'total_r': 0.0, 'net_return': 0.0, 'max_dd': 0.0}
-
-    tr = np.maximum(_high - _low, np.maximum(np.abs(_high - np.roll(_close, 1)), np.abs(_low - np.roll(_close, 1))))
-    atr = pd.Series(tr).rolling(14, min_periods=1).mean().values
-    ema = test_df['close'].ewm(span=20, adjust=False).mean().values
-
-    arr_low  = test_df['low'].values
-    arr_high = test_df['high'].values
-
-    pnl_r_list = []
-    triggers_count = 0
-    max_holding = 20
-    fill_window = 10
-    rr_ratio = 2.0
-    sl_buffer_ratio = 0.5
-    starting_balance = 10000.0
-    risk_per_trade = 0.01
-
-    for i in range(2, N - 1):
-        lo   = arr_low[i-2]
-        hi   = arr_high[i]
-        lo2  = arr_low[i]
-        hi2  = arr_high[i-2]
-        cl   = _close[i]
-        prob = lstm_probs[i] if lstm_probs is not None and i < len(lstm_probs) else 0.5
-        tfm_sig = tfm_signals[i] if tfm_signals is not None and i < len(tfm_signals) else 0.5
-
-        if mode == 'lstm':
-            allow_bull = prob >= 0.48
-            allow_bear = prob <= 0.52
-        elif mode == 'timesfm':
-            allow_bull = (tfm_sig == 1)
-            allow_bear = (tfm_sig == 0)
-        else: # ensemble
-            allow_bull = (prob >= 0.48) and (tfm_sig == 1)
-            allow_bear = (prob <= 0.52) and (tfm_sig == 0)
-
-        # Bullish FVG
-        if lo > hi2:
-            gap_height = lo - hi2
-            if gap_height >= 0.15 * atr[i] and allow_bull and cl >= ema[i]:
-                triggers_count += 1
-                fvg_bottom = hi2
-                ce   = hi2 + 0.5 * gap_height
-                sl   = fvg_bottom - sl_buffer_ratio * gap_height
-                risk = ce - sl
-                if risk > 0:
-                    tp = ce + rr_ratio * risk
-                    fill_bar = -1
-                    end_fill = min(i + fill_window + 1, N)
-                    for b in range(i + 1, end_fill):
-                        if arr_low[b] <= ce:
-                            fill_bar = b
-                            break
-                    if fill_bar > 0:
-                        pnl_r = 0.0
-                        end_hold = min(fill_bar + max_holding, N)
-                        for h in range(fill_bar, end_hold):
-                            if arr_low[h] <= sl:
-                                pnl_r = -1.0
-                                break
-                            if arr_high[h] >= tp:
-                                pnl_r = rr_ratio
-                                break
-                        pnl_r_list.append(pnl_r)
-
-        # Bearish FVG
-        elif hi < lo2:
-            gap_height = lo2 - hi
-            if gap_height >= 0.15 * atr[i] and allow_bear and cl <= ema[i]:
-                triggers_count += 1
-                fvg_top = lo2
-                ce   = hi + 0.5 * gap_height
-                sl   = fvg_top + sl_buffer_ratio * gap_height
-                risk = sl - ce
-                if risk > 0:
-                    tp = ce - rr_ratio * risk
-                    fill_bar = -1
-                    end_fill = min(i + fill_window + 1, N)
-                    for b in range(i + 1, end_fill):
-                        if arr_high[b] >= ce:
-                            fill_bar = b
-                            break
-                    if fill_bar > 0:
-                        pnl_r = 0.0
-                        end_hold = min(fill_bar + max_holding, N)
-                        for h in range(fill_bar, end_hold):
-                            if arr_high[h] >= sl:
-                                pnl_r = -1.0
-                                break
-                            if arr_low[h] <= tp:
-                                pnl_r = rr_ratio
-                                break
-                        pnl_r_list.append(pnl_r)
-
-    n_trades = len(pnl_r_list)
-    win_rate = profit_factor = total_r = net_return = max_dd = 0.0
-
-    if n_trades > 0:
-        pnl_arr      = np.array(pnl_r_list, dtype=np.float64)
-        wins_mask    = pnl_arr > 0
-        gross_profit = pnl_arr[wins_mask].sum()
-        gross_loss   = -pnl_arr[~wins_mask & (pnl_arr < 0)].sum()
-        win_rate     = wins_mask.sum() / n_trades
-        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
-        total_r      = pnl_arr.sum()
-
-        returns      = pnl_arr * risk_per_trade
-        equity_curve = starting_balance * np.cumprod(np.concatenate([[1.0], 1.0 + returns]))
-        peak         = np.maximum.accumulate(equity_curve)
-        max_dd       = np.max((peak - equity_curve) / peak)
-        net_return   = (equity_curve[-1] - starting_balance) / starting_balance
-
-    return {
-        'triggers': triggers_count,
-        'trades': n_trades,
-        'win_rate': win_rate,
-        'profit_factor': profit_factor,
-        'total_r': total_r,
-        'net_return': net_return,
-        'max_dd': max_dd
-    }
-
-
 
 def process_single_timeframe(filepath):
     torch.set_num_threads(1)
@@ -382,6 +242,7 @@ def _print_summary(results):
     print("=" * _W)
     print(f"  Timeframes evaluated : {len(results):>4}   |  Active (trades>0) : {len(active):>4}")
     print(f"  Total triggers       : {total_triggers:>6} |  Total trades       : {total_trades:>6}")
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
     print(f"  Avg Win Rate         : {avg_wr*100:>5.1f}% |  Avg Profit Factor  : {avg_pf:>6.2f}")
     print(f"  Portfolio Total R    : {all_r:>+6.1f}R |  Avg Net Return     : {avg_ret*100:>+6.2f}%")
     print(f"  Avg Max Drawdown     : {avg_dd*100:>5.1f}%")
@@ -397,6 +258,8 @@ def _print_summary(results):
     print("=" * _W)
 
 def main():
+if __name__ == '__main__':
+    main()
     parser = argparse.ArgumentParser(description="Multi-timeframe LSTM backtest pipeline")
     parser.add_argument("--mode",    type=str, default="threads",
                         choices=["threads", "sequential"], help="Execution mode")
