@@ -1,2 +1,6 @@
-NasData/
+*.onnx
+*.onnx.data
+*.pth
+scaler_params.json
 nas100_raw.csv
+NasData/

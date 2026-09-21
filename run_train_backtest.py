@@ -131,13 +131,26 @@ def execute_pipeline():
         equity_curve = starting_balance * np.cumprod(1 + trade_returns)
         max_dd = np.max(np.maximum.accumulate(equity_curve) - equity_curve) / np.maximum.accumulate(equity_curve).max()
 
-        print(f"\n--- Backtest Results Summary ---")
-        print(f"Total Trades Executed: {len(trade_returns)}")
-        print(f"Strategy Win Rate:     {win_rate * 100:.2f}%")
-        print(f"Net Return:            {((equity_curve[-1] / starting_balance) - 1) * 100:.2f}%")
-        print(f"Max Drawdown:          {max_dd * 100:.2f}%")
+        winning_trades = len(trade_returns[trade_returns > 0])
+        losing_trades = len(trade_returns[trade_returns <= 0])
+
+        print("\n==================================================")
+        print("          BROKER-ALIGNED BACKTEST SUMMARY")
+        print("==================================================")
+        print(f"* Total Evaluated Bars:     {len(val_preds)} (Out-of-Sample Partition)")
+        print(f"* Strategy Triggers (FVG):  {len(trade_returns)} Confluence Entries Matched")
+        print(f"* Winning Trades:           {winning_trades}")
+        print(f"* Losing Trades:            {losing_trades}")
+        print(f"* Strategy Win Rate:        {win_rate * 100:.2f}%")
+        print(f"* Net Return on Account:    +{((equity_curve[-1] / starting_balance) - 1) * 100:.2f}% (Starting Balance: ${starting_balance:,.2f})" if ((equity_curve[-1] / starting_balance) - 1) > 0 else f"* Net Return on Account:    {((equity_curve[-1] / starting_balance) - 1) * 100:.2f}% (Starting Balance: ${starting_balance:,.2f})")
+        print(f"* Maximum Drawdown:         -{max_dd * 100:.2f}%")
+        print("* Execution Constraints:    Contract Size = 10 | Min Stops = 50 pts")
     else:
-        print("\n--- Backtest Results Summary ---")
+        print("\n==================================================")
+        print("          BROKER-ALIGNED BACKTEST SUMMARY")
+        print("==================================================")
+        print(f"* Total Evaluated Bars:     {len(val_preds)} (Out-of-Sample Partition)")
+        print("* Strategy Triggers (FVG):  0 Confluence Entries Matched")
         print("No trade setups met the FVG Consequent Encroachment confluence criteria in this validation slice.")
 
 if __name__ == "__main__":
