@@ -1,7 +1,9 @@
 import unittest
 import numpy as np
 import pandas as pd
-from train_nas100_lstm import create_sequences, compute_features
+import torch
+import torch.nn as nn
+from train_nas100_lstm import create_sequences, compute_features, DirectionalLSTM, train_tf_dataset
 
 class TestCreateSequences(unittest.TestCase):
 
@@ -188,16 +190,27 @@ class TestComputeFeatures(unittest.TestCase):
         # hl_range should be (0-0)/(0+1e-8) = 0
         np.testing.assert_almost_equal(result_df.loc[1, 'hl_range'], 0.0)
 
+
+
+class TestDirectionalLSTM(unittest.TestCase):
+    def test_forward_pass(self):
+        model = DirectionalLSTM(input_size=5, hidden_size=16, dropout=0.1)
+        x = torch.randn(4, 10, 5)
+        out = model(x)
+        self.assertEqual(out.shape, (4, 1))
+        self.assertTrue(torch.all(out >= 0.0) and torch.all(out <= 1.0))
+
+class TestTrainTFDataset(unittest.TestCase):
+    def test_insufficient_data(self):
+        df_short = pd.DataFrame({
+            'open': np.ones(50),
+            'high': np.ones(50),
+            'low': np.ones(50),
+            'close': np.ones(50),
+            'tick_volume': np.ones(50)
+        })
+        res = train_tf_dataset(df_short, "test_short.csv")
+        self.assertIsNone(res)
+
 if __name__ == '__main__':
     unittest.main()
-
-
-        pd.testing.assert_series_equal(result_df['ret1'], pd.Series(expected_ret1, name='ret1'), check_dtype=True)
-        pd.testing.assert_series_equal(result_df['hl_range'], pd.Series(expected_hl_range, name='hl_range'), check_dtype=True)
-        pd.testing.assert_series_equal(result_df['upper_wick'], pd.Series(expected_upper_wick, name='upper_wick'), check_dtype=True)
-        pd.testing.assert_series_equal(result_df['lower_wick'], pd.Series(expected_lower_wick, name='lower_wick'), check_dtype=True)
-        pd.testing.assert_series_equal(result_df['target'], pd.Series(expected_target, name='target'), check_dtype=True)
-
-
-        self.assertEqual(actual_X.dtype, np.float32)
-        self.assertEqual(actual_Y.dtype, np.float32)
