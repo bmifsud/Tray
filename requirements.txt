@@ -6,4 +6,12 @@ onnx
 onnxscript
 torchvision
 gdown
-MetaTrader5
+#MetaTrader5
+uvicorn
+asyncpg
+fastapi
+pytest
+pytest-asyncio
+httpx
+pyarrow
+pytest-xdist
