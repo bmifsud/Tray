@@ -32,13 +32,15 @@ def compute_features(df):
     df['upper_wick'] = (high - np.maximum(open_p, close)) / (close + 1e-8)
     df['lower_wick'] = (np.minimum(open_p, close) - low) / (close + 1e-8)
     
-    vol_mean = vol.rolling(20, min_periods=5).mean()
-    vol_std = vol.rolling(20, min_periods=5).std()
+    vol_roll = vol.rolling(20, min_periods=5)
+    vol_mean = vol_roll.mean()
+    vol_std = vol_roll.std()
     df['vol_norm'] = (vol - vol_mean) / (vol_std + 1e-8)
 
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=5).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=5).mean()
+    delta = close.diff().fillna(0) # Fill first NaN to mimic `.where` behavior on NaN
+    # ⚡ Bolt: Replace `.where` with `.clip` for significant performance gains
+    gain = delta.clip(lower=0).rolling(window=14, min_periods=5).mean()
+    loss = (-delta.clip(upper=0)).rolling(window=14, min_periods=5).mean()
     rs = gain / (loss + 1e-9)
     rsi = 100 - (100 / (1 + rs))
     df['rsi'] = (rsi - 50.0) / 50.0
