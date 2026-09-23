@@ -7,3 +7,9 @@ onnxscript
 torchvision
 gdown
 MetaTrader5
+fastapi
+uvicorn
+apscheduler
+sqlalchemy
+pydantic
+httpx
