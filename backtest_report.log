@@ -1,0 +1,20 @@
+Model MSE: 0.082433
+Naive Baseline MSE: 0.152985
+[torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`...
+[torch.onnx] Obtain model graph for `LSTMModel([...]` with `torch.export.export(..., strict=False)`... ✅
+[torch.onnx] Run decompositions...
+[torch.onnx] Run decompositions... ✅
+[torch.onnx] Translate the graph into ONNX...
+[torch.onnx] Translate the graph into ONNX... ✅
+[torch.onnx] Optimize the ONNX graph...
+[torch.onnx] Optimize the ONNX graph... ✅
+Model exported to nas100_lstm.onnx
+=== STEP 1: Executing Leak-Free LSTM Training & ONNX Export ===
+
+=== STEP 2: Running Evaluation & Backtest Analysis ===
+
+--- Backtest Results Summary ---
+Total Trades Executed: 21
+Strategy Win Rate:     23.81%
+Net Return:            -28.99%
+Max Drawdown:          8.15%

@@ -1,43 +1,41 @@
-import MetaTrader5 as mt5
 import pandas as pd
-from datetime import datetime
-import pytz
+import gdown
+import os
+import shutil
+import sys
 
-def extract_data():
-    if not mt5.initialize():
-        print("initialize() failed")
-        mt5.shutdown()
-        return
+def extract_data(input_file="NasData/NQ_in_daily.csv", download=True):
+    # Download folder from Google Drive
+    if download:
+        url = "https://drive.google.com/drive/folders/13LjovZc6Vo4ZCTlyAM55vRsb4au0oJo8"
+        gdown.download_folder(url, output="NasData", quiet=False, use_cookies=False)
 
-    symbol = "NAS100"
+    print(f"Extracting data from: {input_file}")
+    df = pd.read_csv(input_file)
 
-    if not mt5.symbol_select(symbol, True):
-        print(f"Failed to select {symbol}")
+    # Rename columns to match existing pipeline
+    # ['time', 'open', 'high', 'low', 'close', 'tick_volume']
+    df = df.rename(columns={
+        'datetime': 'time',
+        'volume': 'tick_volume'
+    })
 
-    timezone = pytz.timezone("UTC")
-    utc_now = datetime.now(timezone)
+    # Convert 'time' to datetime
+    df['time'] = pd.to_datetime(df['time'], utc=True)
 
-    rates = mt5.copy_rates_from(symbol, mt5.TIMEFRAME_D1, utc_now, 10000)
-
-    if rates is None or len(rates) == 0:
-        print("Failed to get rates")
-        mt5.shutdown()
-        return
-
-    df = pd.DataFrame(rates)
-
-    df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
-
-    # Filter out unclosed active daily bars
-    df = df[df['time'].dt.date < utc_now.date()]
-
-    # Select required columns: OHLCV + tick_volume
-    # Actually in MT5 OHLCV is tick_volume or real_volume, we'll keep both if necessary but prompt asks for tick volume
+    # Select required columns
     df = df[['time', 'open', 'high', 'low', 'close', 'tick_volume']]
 
+    # Sort chronologically if not already
+    df = df.sort_values('time').reset_index(drop=True)
+
+    # Save to nas100_raw.csv
     df.to_csv('nas100_raw.csv', index=False)
 
-    mt5.shutdown()
+    print("Data extraction complete. Saved to nas100_raw.csv")
 
 if __name__ == '__main__':
-    extract_data()
+    if len(sys.argv) > 1:
+        extract_data(sys.argv[1], download=False)
+    else:
+        extract_data()
