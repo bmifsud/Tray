@@ -1,12 +1,9 @@
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-import shlex
 
 def run_cmd(cmd):
-    # Security fix: Split command to avoid shell=True vulnerabilities
-    cmd_list = shlex.split(cmd)
-    res = subprocess.run(cmd_list, capture_output=True, text=True)
+    res = subprocess.run(cmd, shell=False, capture_output=True, text=True)
     return cmd, res.returncode, res.stdout, res.stderr
 
 def run_parallel_checks():
