@@ -7,3 +7,7 @@ onnxscript
 torchvision
 gdown
 MetaTrader5
+fastapi
+uvicorn
+pyarrow
+pytest
