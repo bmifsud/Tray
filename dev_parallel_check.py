@@ -1,9 +1,11 @@
 import sys
 import subprocess
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 
 def run_cmd(cmd):
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    args = shlex.split(cmd)
+    res = subprocess.run(args, shell=False, capture_output=True, text=True)
     return cmd, res.returncode, res.stdout, res.stderr
 
 def run_parallel_checks():
