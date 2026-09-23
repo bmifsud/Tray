@@ -9,5 +9,7 @@ gdown
 MetaTrader5
 fastapi
 uvicorn
-pyarrow
-pytest
+sqlalchemy
+asyncpg
+alembic
+pydantic-settings
