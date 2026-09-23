@@ -3,7 +3,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 def run_cmd(cmd):
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    res = subprocess.run(cmd, shell=False, capture_output=True, text=True)
     return cmd, res.returncode, res.stdout, res.stderr
 
 def run_parallel_checks():

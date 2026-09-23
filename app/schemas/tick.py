@@ -1,12 +1,14 @@
-from pydantic import BaseModel, ConfigDict
-from datetime import datetime
+from pydantic import BaseModel
 
-class TickCreate(BaseModel):
+class TickBase(BaseModel):
     symbol: str
-    time: datetime
+    timestamp: int
     bid: float
     ask: float
-    last: float
-    volume: int
+    tick_volume: int
 
-    model_config = ConfigDict(from_attributes=True)
+class TickResponse(TickBase):
+    id: int
+
+    class Config:
+        from_attributes = True
