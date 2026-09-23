@@ -6,7 +6,8 @@ onnx
 onnxscript
 torchvision
 gdown
-MetaTrader5
+# MetaTrader5 is only available on Windows; skip it in Linux CI runners.
+MetaTrader5; platform_system == "Windows"
 fastapi
 uvicorn
 pyarrow
