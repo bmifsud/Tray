@@ -6,4 +6,4 @@ onnx
 onnxscript
 torchvision
 gdown
-MetaTrader5
+MetaTrader5; sys_platform == 'win32'
