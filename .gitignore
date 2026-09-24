@@ -9,3 +9,5 @@ nas100_raw.csv
 *.env
 .env.*
 !.env.example
+venv/
+.venv/
