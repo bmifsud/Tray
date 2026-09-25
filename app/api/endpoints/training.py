@@ -46,8 +46,11 @@ async def get_training_data(
     pq.write_table(table, buf)
     buf.seek(0)
 
+    def iterfile():
+        yield buf.getvalue()
+
     return StreamingResponse(
-        buf,
+        iterfile(),
         media_type="application/vnd.apache.parquet",
         headers={
             "Content-Disposition": f"attachment; filename=training_data_{symbol}_{timeframe}.parquet"
