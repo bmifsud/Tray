@@ -1,4 +1,13 @@
 from pydantic import BaseModel
+from datetime import datetime
+
+class TickCreate(BaseModel):
+    symbol: str
+    time: datetime
+    bid: float
+    ask: float
+    last: float
+    volume: int
 
 class TickBase(BaseModel):
     symbol: str
