@@ -2,7 +2,6 @@ import sys
 import subprocess
 import shlex
 from concurrent.futures import ThreadPoolExecutor
-import shlex
 
 def run_cmd(cmd):
     args = shlex.split(cmd)
