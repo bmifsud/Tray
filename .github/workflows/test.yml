@@ -29,4 +29,4 @@ jobs:
 
       - name: Run pytest
         run: |
-          pytest tests/
+          pytest tests/ test_google_timesfm_model.py test_dev_parallel_check.py test_omni_route.py test_conftest.py test_extract_nas100_raw.py
