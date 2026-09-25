@@ -32,8 +32,65 @@ def run_fvg_backtest(test_df, lstm_probs, tfm_signals=None, mode='ensemble'):
     arr_low  = test_df['low'].values
     arr_high = test_df['high'].values
 
+    # Pre-calculate probabilities & signals arrays to avoid loops
+    if lstm_probs is None:
+        lstm_probs = np.full(N, 0.5)
+    elif len(lstm_probs) < N:
+        lstm_probs = np.concatenate([lstm_probs, np.full(N - len(lstm_probs), 0.5)])
+    if tfm_signals is None:
+        tfm_signals = np.full(N, 0.5)
+    elif len(tfm_signals) < N:
+        tfm_signals = np.concatenate([tfm_signals, np.full(N - len(tfm_signals), 0.5)])
+
+    if mode == 'lstm':
+        allow_bull = lstm_probs >= 0.48
+        allow_bear = lstm_probs <= 0.52
+    elif mode == 'timesfm':
+        allow_bull = tfm_signals == 1
+        allow_bear = tfm_signals == 0
+    else: # ensemble
+        allow_bull = (lstm_probs >= 0.48) & (tfm_signals == 1)
+        allow_bear = (lstm_probs <= 0.52) & (tfm_signals == 0)
+
+    atr_thresh = 0.15 * atr
+
+    # Vectorized FVG condition evaluation (shifting arrays by appropriate offsets)
+    lo_arr   = arr_low[:N-3]
+    hi2_arr  = arr_high[:N-3]
+    hi_arr   = arr_high[2:N-1]
+    lo2_arr  = arr_low[2:N-1]
+    cl_arr   = _close[2:N-1]
+    ema_arr  = ema[2:N-1]
+    bull_arr = allow_bull[2:N-1]
+    bear_arr = allow_bear[2:N-1]
+    ath_arr  = atr_thresh[2:N-1]
+
+    # Bullish FVG pre-calculation
+    bull_gap_height = lo_arr - hi2_arr
+    bull_outer_cond = (lo_arr > hi2_arr)
+    bullish_cond = bull_outer_cond & (bull_gap_height >= ath_arr) & bull_arr & (cl_arr >= ema_arr)
+
+    # Bearish FVG pre-calculation
+    bear_gap_height = lo2_arr - hi_arr
+    bearish_cond = (hi_arr < lo2_arr) & (bear_gap_height >= ath_arr) & bear_arr & (cl_arr <= ema_arr)
+
+    # Eliminate overlapping signals: in original code `elif hi < lo2` ensures bearish evaluates ONLY if `lo > hi2` was false.
+    bearish_cond = bearish_cond & ~bull_outer_cond
+
+    bull_indices = np.where(bullish_cond)[0] + 2
+    bear_indices = np.where(bearish_cond)[0] + 2
+
+    # Combine indices while keeping track of types for processing order
+    all_indices = np.concatenate((bull_indices, bear_indices))
+    is_bull = np.concatenate((np.ones(len(bull_indices), dtype=bool), np.zeros(len(bear_indices), dtype=bool)))
+
+    if len(all_indices) > 0:
+        sort_idx = np.argsort(all_indices)
+        all_indices = all_indices[sort_idx]
+        is_bull = is_bull[sort_idx]
+
     pnl_r_list = []
-    triggers_count = 0
+    triggers_count = len(all_indices)
     max_holding = 20
     fill_window = 10
     rr_ratio = 2.0
@@ -41,82 +98,61 @@ def run_fvg_backtest(test_df, lstm_probs, tfm_signals=None, mode='ensemble'):
     starting_balance = 10000.0
     risk_per_trade = 0.01
 
-    for i in range(2, N - 1):
-        lo   = arr_low[i-2]
-        hi   = arr_high[i]
-        lo2  = arr_low[i]
-        hi2  = arr_high[i-2]
-        cl   = _close[i]
-        prob = lstm_probs[i] if lstm_probs is not None and i < len(lstm_probs) else 0.5
-        tfm_sig = tfm_signals[i] if tfm_signals is not None and i < len(tfm_signals) else 0.5
-
-        if mode == 'lstm':
-            allow_bull = prob >= 0.48
-            allow_bear = prob <= 0.52
-        elif mode == 'timesfm':
-            allow_bull = (tfm_sig == 1)
-            allow_bear = (tfm_sig == 0)
-        else: # ensemble
-            allow_bull = (prob >= 0.48) and (tfm_sig == 1)
-            allow_bear = (prob <= 0.52) and (tfm_sig == 0)
-
-        # Bullish FVG
-        if lo > hi2:
-            gap_height = lo - hi2
-            if gap_height >= 0.15 * atr[i] and allow_bull and cl >= ema[i]:
-                triggers_count += 1
-                fvg_bottom = hi2
-                ce   = hi2 + 0.5 * gap_height
-                sl   = fvg_bottom - sl_buffer_ratio * gap_height
-                risk = ce - sl
-                if risk > 0:
-                    tp = ce + rr_ratio * risk
-                    fill_bar = -1
-                    end_fill = min(i + fill_window + 1, N)
-                    for b in range(i + 1, end_fill):
-                        if arr_low[b] <= ce:
-                            fill_bar = b
+    # Python loop executes only on actual triggered bars
+    for idx in range(len(all_indices)):
+        i = all_indices[idx]
+        if is_bull[idx]:
+            hi2_val = arr_high[i-2]
+            lo_val = arr_low[i-2]
+            gap_height = lo_val - hi2_val
+            ce = hi2_val + 0.5 * gap_height
+            sl = hi2_val - sl_buffer_ratio * gap_height
+            risk = ce - sl
+            if risk > 0:
+                tp = ce + rr_ratio * risk
+                fill_bar = -1
+                end_fill = min(i + fill_window + 1, N)
+                for b in range(i + 1, end_fill):
+                    if arr_low[b] <= ce:
+                        fill_bar = b
+                        break
+                if fill_bar > 0:
+                    pnl_r = 0.0
+                    end_hold = min(fill_bar + max_holding, N)
+                    for h in range(fill_bar, end_hold):
+                        if arr_low[h] <= sl:
+                            pnl_r = -1.0
                             break
-                    if fill_bar > 0:
-                        pnl_r = 0.0
-                        end_hold = min(fill_bar + max_holding, N)
-                        for h in range(fill_bar, end_hold):
-                            if arr_low[h] <= sl:
-                                pnl_r = -1.0
-                                break
-                            if arr_high[h] >= tp:
-                                pnl_r = rr_ratio
-                                break
-                        pnl_r_list.append(pnl_r)
-
-        # Bearish FVG
-        elif hi < lo2:
-            gap_height = lo2 - hi
-            if gap_height >= 0.15 * atr[i] and allow_bear and cl <= ema[i]:
-                triggers_count += 1
-                fvg_top = lo2
-                ce   = hi + 0.5 * gap_height
-                sl   = fvg_top + sl_buffer_ratio * gap_height
-                risk = sl - ce
-                if risk > 0:
-                    tp = ce - rr_ratio * risk
-                    fill_bar = -1
-                    end_fill = min(i + fill_window + 1, N)
-                    for b in range(i + 1, end_fill):
-                        if arr_high[b] >= ce:
-                            fill_bar = b
+                        if arr_high[h] >= tp:
+                            pnl_r = rr_ratio
                             break
-                    if fill_bar > 0:
-                        pnl_r = 0.0
-                        end_hold = min(fill_bar + max_holding, N)
-                        for h in range(fill_bar, end_hold):
-                            if arr_high[h] >= sl:
-                                pnl_r = -1.0
-                                break
-                            if arr_low[h] <= tp:
-                                pnl_r = rr_ratio
-                                break
-                        pnl_r_list.append(pnl_r)
+                    pnl_r_list.append(pnl_r)
+        else:
+            lo2_val = arr_low[i]
+            hi_val = arr_high[i]
+            gap_height = lo2_val - hi_val
+            ce = hi_val + 0.5 * gap_height
+            sl = lo2_val + sl_buffer_ratio * gap_height
+            risk = sl - ce
+            if risk > 0:
+                tp = ce - rr_ratio * risk
+                fill_bar = -1
+                end_fill = min(i + fill_window + 1, N)
+                for b in range(i + 1, end_fill):
+                    if arr_high[b] >= ce:
+                        fill_bar = b
+                        break
+                if fill_bar > 0:
+                    pnl_r = 0.0
+                    end_hold = min(fill_bar + max_holding, N)
+                    for h in range(fill_bar, end_hold):
+                        if arr_high[h] >= sl:
+                            pnl_r = -1.0
+                            break
+                        if arr_low[h] <= tp:
+                            pnl_r = rr_ratio
+                            break
+                    pnl_r_list.append(pnl_r)
 
     n_trades = len(pnl_r_list)
     win_rate = profit_factor = total_r = net_return = max_dd = 0.0
