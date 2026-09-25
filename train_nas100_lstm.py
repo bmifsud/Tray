@@ -32,13 +32,11 @@ def compute_features(df):
     df['upper_wick'] = (high - np.maximum(open_p, close)) / (close + 1e-8)
     df['lower_wick'] = (np.minimum(open_p, close) - low) / (close + 1e-8)
     
-    vol_roll = vol.rolling(20, min_periods=5)
-    vol_mean = vol_roll.mean()
-    vol_std = vol_roll.std()
+    vol_mean = vol.rolling(20, min_periods=5).mean()
+    vol_std = vol.rolling(20, min_periods=5).std()
     df['vol_norm'] = (vol - vol_mean) / (vol_std + 1e-8)
 
-    delta = close.diff().fillna(0) # Fill first NaN to mimic `.where` behavior on NaN
-    # ⚡ Bolt: Replace `.where` with `.clip` for significant performance gains
+    delta = close.diff().fillna(0)  # Fill the initial NaN before separating gains and losses.
     gain = delta.clip(lower=0).rolling(window=14, min_periods=5).mean()
     loss = (-delta.clip(upper=0)).rolling(window=14, min_periods=5).mean()
     rs = gain / (loss + 1e-9)
@@ -48,7 +46,7 @@ def compute_features(df):
     df['target'] = (close.shift(-1) > close).astype(float)
     return df
 
-def create_sequences(X, Y, lookback=15):
+ def create_sequences(X, Y, lookback=15):
     n = len(X)
     if n <= lookback:
         return np.empty((0, lookback, X.shape[1]), dtype=np.float32), np.empty((0,), dtype=np.float32)
@@ -78,7 +76,7 @@ class DirectionalLSTM(nn.Module):
         out = self.sigmoid(out)
         return out
 
-def train_tf_dataset(df_raw, tf_name, optimize_grid=True, seed=42):
+ def train_tf_dataset(df_raw, tf_name, optimize_grid=True, seed=42):
     torch.manual_seed(seed)
     np.random.seed(seed)
     df = compute_features(df_raw.copy())
@@ -242,12 +240,12 @@ def train_tf_dataset(df_raw, tf_name, optimize_grid=True, seed=42):
         'scaler': scaler
     }
 
-def ensure_data_available():
+ def ensure_data_available():
     os.makedirs("NasData", exist_ok=True)
     csv_files = glob.glob("NasData/*.csv")
     valid_files = []
     for f in csv_files:
-        if "ticks" in f.lower():  # Skip tick data for bar-based training
+        if "ticks" in f.lower():
             continue
         try:
             df = pd.read_csv(f, nrows=5)
@@ -269,9 +267,8 @@ def ensure_data_available():
     except Exception as e:
         print(f"[WARN] MT5 auto-download unavailable or failed: {e}")
 
-    # Re-check for files after attempted download
     csv_files = glob.glob("NasData/*.csv")
-    valid_files = [f for f in csv_files if "ticks" not in f.lower() and os.path.getsize(f) > 100] # Check file size too
+    valid_files = [f for f in csv_files if "ticks" not in f.lower() and os.path.getsize(f) > 100]
     if valid_files:
         return valid_files
 
@@ -296,7 +293,7 @@ def ensure_data_available():
 
 if __name__ == '__main__':
     start_time = time.time()
-    csv_files = ensure_data_available() # Call the new function
+    csv_files = ensure_data_available()
     
     print(f"\n[INFO] Starting concurrent standalone training across {len(csv_files)} datasets...")
     print("=" * 120)
@@ -318,8 +315,6 @@ if __name__ == '__main__':
             
             res = train_tf_dataset(df_raw, filename)
             dur = time.time() - t0
-            
-            # Google TimesFM zero-shot evaluation
             tfm_acc = 0.0
             try:
                 from google_timesfm_model import evaluate_timesfm_on_dataframe
@@ -331,27 +326,16 @@ if __name__ == '__main__':
             if res:
                 p = res['best_params']
                 cfg_str = f"L={p['lookback']}, H={p['hidden_size']}, DR={p['dropout']:.1f}, LR={p['lr']}"
-                output_res = {
-                    'filename': filename,
-                    'status': 'DONE',
-                    'bars': len(res['df_clean']),
-                    'params': cfg_str,
-                    'val_loss': res['val_loss'],
-                    'val_acc': res['val_acc'],
-                    'tfm_acc': tfm_acc,
-                    'time': dur
-                }
+                output_res = {'filename': filename, 'status': 'DONE', 'bars': len(res['df_clean']), 'params': cfg_str, 'val_loss': res['val_loss'], 'val_acc': res['val_acc'], 'tfm_acc': tfm_acc, 'time': dur}
             else:
                 output_res = {'filename': filename, 'status': 'LOW_DATA', 'bars': len(df_raw), 'params': 'N/A', 'val_loss': 0.0, 'val_acc': 0.0, 'tfm_acc': tfm_acc, 'time': dur}
 
-            # Explicit resource cleanup and garbage collection
             del df_raw
             if res:
                 del res
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-
             return output_res
         except Exception as e:
             return {'filename': filename, 'status': 'ERROR', 'bars': 0, 'params': str(e), 'val_loss': 0.0, 'val_acc': 0.0, 'tfm_acc': 0.0, 'time': time.time() - t0}
